@@ -26,3 +26,9 @@ next-env.d.ts
 /data/*.db
 /data/*.db-wal
 /data/*.db-shm
+
+# sensitive files
+/data/.linkedin_cookies.json
+.env
+.env.local
+.env.*.local
