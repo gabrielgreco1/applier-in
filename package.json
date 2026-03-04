@@ -1,0 +1,41 @@
+{
+  "name": "applier",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "better-sqlite3": "^12.6.2",
+    "drizzle-orm": "^0.45.1",
+    "next": "^16.1.6",
+    "openai": "^6.25.0",
+    "playwright": "^1.58.2",
+    "postcss": "^8.5.8",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.4",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "25.3.3",
+    "@types/uuid": "^10.0.0",
+    "drizzle-kit": "^0.31.9",
+    "eslint": "^10.0.2",
+    "tsx": "^4.21.0"
+  }
+}
