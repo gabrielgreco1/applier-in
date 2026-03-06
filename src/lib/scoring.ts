@@ -1,38 +1,15 @@
 import OpenAI from 'openai';
-import fs from 'fs';
-import path from 'path';
-import { loadConfig } from './config';
+import { loadConfig, type AppConfig } from './config';
 
 let openaiClient: OpenAI | null = null;
 
-function getOpenAI(): OpenAI {
+function getOpenAI(config: AppConfig): OpenAI {
+  // Always recreate if key might have changed (lazy singleton per key)
+  const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY || '';
   if (!openaiClient) {
-    let apiKey = process.env.OPENAI_API_KEY || '';
-    try {
-      const config = loadConfig();
-      if (config.openaiApiKey) apiKey = config.openaiApiKey;
-    } catch { /* use env */ }
     openaiClient = new OpenAI({ apiKey });
   }
   return openaiClient;
-}
-
-let cachedResume: string | null = null;
-
-function getResume(): string {
-  if (!cachedResume) {
-    // Prefer config resume, fall back to file
-    try {
-      const config = loadConfig();
-      if (config.resume && config.resume.trim().length > 50) {
-        cachedResume = config.resume;
-        return cachedResume;
-      }
-    } catch { /* fall back to file */ }
-    const resumePath = process.env.RESUME_PATH || './data/resume.txt';
-    cachedResume = fs.readFileSync(path.resolve(resumePath), 'utf-8');
-  }
-  return cachedResume;
 }
 
 export interface ScoringResult {
@@ -43,70 +20,78 @@ export interface ScoringResult {
   concerns: string[];
 }
 
+function buildSystemPrompt(config: AppConfig): string {
+  const p = config.profile;
+  const location = [p.city, p.state, p.country].filter(Boolean).join(', ') || 'unknown location';
+  const years = p.yearsOfExperience ? `${p.yearsOfExperience} years of experience` : '';
+  const needsVisa = config.compliance.requireVisa === 'No' ? 'does not need visa sponsorship' : 'needs visa sponsorship';
+  const headline = config.freeText.headline || 'Software Engineer';
+
+  return `You are a STRICT job match scoring system for a candidate applying to remote jobs.
+
+CANDIDATE PROFILE:
+- Role: ${headline}
+- Location: ${location}
+${years ? `- Experience: ${years}` : ''}
+- Work authorization: ${needsVisa}
+- Seek remote work
+
+DEALBREAKER CHECK (MANDATORY):
+1. LOCATION:
+   - On-site/hybrid in a country different from candidate's → MAX SCORE 15
+   - Remote-only but requires relocation or on-site presence → MAX SCORE 20
+   - Remote with timezone restrictions that don't match → MAX SCORE 35
+   - Fully remote with no location restrictions → NO PENALTY
+
+2. VISA / SPONSORSHIP:
+   - Job requires local authorization candidate does not have → MAX SCORE 20
+
+SKILLS SCORING (0-100 base):
+- 0-20 pts: Role completely unrelated to candidate's experience
+- 20-40 pts: Tangentially related but missing core skills
+- 40-60 pts: Some overlapping skills but significant gaps in key requirements
+- 60-75 pts: Good match with 70-85% of job requirements covered, minor gaps
+- 75-90 pts: Strong match with 85%+ of requirements, aligned with career progression
+- 90-100 pts: Excellent match — 95%+ coverage, perfect role fit
+
+CRITICAL: Score based on job DETAILS not just title:
+- If description is too vague/generic (<200 chars), score can't exceed 70 (insufficient signal)
+- Heavy penalties for conflicting or unrealistic requirements
+- Give credit for EXACT technology matches, not just "similar" tech
+
+Return JSON with:
+- score: number 0-100 (strictly enforced)
+- reasoning: string (2-3 sentences explaining WHY this score, reference specific requirements)
+- keyMatches: string[] (specific skills/requirements matched)
+- concerns: string[] (ALL gaps, dealbreakers, vague requirements)`;
+}
+
 export async function scoreJobMatch(
   jobTitle: string,
   jobDescription: string,
   companyName: string,
   thresholdOverride?: number
 ): Promise<ScoringResult> {
-  const resume = getResume();
-  const threshold = thresholdOverride ?? parseInt(process.env.MATCH_SCORE_THRESHOLD || '60', 10);
+  const config = loadConfig();
+  const resume = config.resume || '';
+  const threshold = thresholdOverride ?? config.scoreThreshold ?? 60;
 
-  // Warn if resume is still placeholder
-  if (resume.includes('Placeholder resume') || resume.trim().length < 100) {
-    console.warn('[scoring] WARNING: resume.txt appears to be placeholder or too short (' + resume.trim().length + ' chars). Scores will be inaccurate.');
+  if (!resume || resume.trim().length < 100) {
+    console.warn('[scoring] WARNING: Resume is missing or too short. Scores will be inaccurate. Set your resume in /config.');
   }
 
-  // Warn if job description is empty
   if (!jobDescription || jobDescription.trim().length < 20) {
-    console.warn('[scoring] WARNING: job description is empty or very short (' + (jobDescription?.trim().length || 0) + ' chars). Score may be inaccurate.');
+    console.warn('[scoring] WARNING: job description is empty or very short. Score may be inaccurate.');
   }
 
-  const response = await getOpenAI().chat.completions.create({
+  const response = await getOpenAI(config).chat.completions.create({
     model: 'gpt-4o-mini',
     temperature: 0.1,
     response_format: { type: 'json_object' },
     messages: [
       {
         role: 'system',
-        content: `You are a STRICT job match scoring system for a remote software engineer based in Brazil (São Paulo, UTC-3).
-
-CANDIDATE PROFILE:
-- Based in Brazil, open to remote work worldwide
-- NO university degree (self-taught engineer with 4+ years professional experience)
-- Bilingual: Portuguese + English
-- CANNOT relocate to the US or work on-site in the US/Europe
-- Valid work authorization for remote work from Brazil
-
-DEALBREAKER CHECK (MANDATORY):
-1. LOCATION:
-   - On-site/hybrid in US/Europe → MAX SCORE 15
-   - Remote-only but "must be in US timezone" or "US candidates preferred" → MAX SCORE 35
-   - Remote with no location restrictions → NO PENALTY
-
-2. EDUCATION:
-   - Degree "required" / "must have" → MAX SCORE 30
-   - Degree "preferred" / "nice to have" → -15 points from final score
-   - No degree mentioned → NO PENALTY
-
-SKILLS SCORING (0-100 base):
-- 0-20 pts: Role completely unrelated (e.g., Sales, HR, Design with no tech)
-- 20-40 pts: Tangentially related but missing core skills
-- 40-60 pts: Some overlapping skills but significant gaps in key requirements (e.g., needs specific framework not listed, needs specialty like ML/Data Science)
-- 60-75 pts: Good match with 70-85% of job requirements covered, minor technology gaps
-- 75-90 pts: Strong match with 85%+ of requirements, aligned with career progression
-- 90-100 pts: Excellent match - 95%+ coverage, perfect role fit, rare find
-
-CRITICAL: Score based on job DETAILS not just title:
-- If description is too vague/generic (<200 chars), score can't exceed 70 (insufficient signal)
-- Heavy penalties for conflicting needs (e.g., "we need ML expert BUT also full-stack generalist")
-- Give credit for EXACT technology matches, not just "similar" tech
-
-Return JSON with:
-- score: number 0-100 (strictly enforced)
-- reasoning: string (2-3 sentences explaining WHY this score, reference specific requirements)
-- keyMatches: string[] (specific skills matched to job requirements)
-- concerns: string[] (ALL gaps, dealbreakers, vague requirements)`,
+        content: buildSystemPrompt(config),
       },
       {
         role: 'user',
