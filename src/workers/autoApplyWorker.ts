@@ -217,43 +217,123 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
     }
   }
 
-  // 3. Select dropdowns
-  const selects = modal.locator('select:visible');
-  const selectCount = await selects.count().catch(() => 0);
-  for (let i = 0; i < selectCount; i++) {
-    const select = selects.nth(i);
-    if (!await select.isVisible().catch(() => false)) continue;
-    const currentVal = await select.inputValue().catch(() => '');
-    if (currentVal && currentVal !== '' && currentVal !== 'Select an option') continue;
+  // 3. Select dropdowns — use page.evaluate() for reliable label extraction
+  const selectData = await modal.evaluate((modalEl: Element) => {
+    const results: Array<{ index: number; label: string; options: string[]; currentValue: string }> = [];
+    const selects = modalEl.querySelectorAll('select');
+    selects.forEach((select, idx) => {
+      const currentValue = (select as HTMLSelectElement).value;
+      const opts = Array.from((select as HTMLSelectElement).options)
+        .map(o => o.text.trim())
+        .filter(o => o && o.toLowerCase() !== 'select an option' && o !== '');
 
-    const label = await getFieldLabel(page, select);
-    if (!label) continue;
+      let label = '';
 
-    const options = await select.locator('option').allTextContents().catch(() => [] as string[]);
-    let answer = answerQuestion(label, config);
-    if (!answer && config.useAI && config.openaiApiKey) {
-      answer = await askAI(label, options.filter(o => o.trim()), config);
-      if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered select "${label}" → "${answer}"`, meta: { jobId } });
+      // Strategy 1: label[for]
+      if (select.id) {
+        const lbl = document.querySelector(`label[for="${select.id}"]`);
+        if (lbl) label = lbl.textContent?.trim() || '';
+      }
+
+      // Strategy 2: Walk up to form element container and find question text
+      if (!label) {
+        let parent: Element | null = select.parentElement;
+        for (let depth = 0; depth < 10 && parent; depth++) {
+          // LinkedIn wraps each question in a div with specific classes
+          if (parent.classList.contains('fb-dash-form-element') ||
+              parent.classList.contains('jobs-easy-apply-form-element') ||
+              parent.querySelector('select') === select) {
+            const candidates = parent.querySelectorAll('label, legend, span.fb-dash-form-element__label, span.t-14, span.t-bold, div.fb-dash-form-element__label');
+            for (const c of candidates) {
+              const text = c.textContent?.trim();
+              if (text && text.length > 5 && text.toLowerCase() !== 'select an option') {
+                label = text;
+                break;
+              }
+            }
+            if (label) break;
+          }
+          parent = parent.parentElement;
+        }
+      }
+
+      // Strategy 3: aria-labelledby or aria-label
+      if (!label) {
+        const ariaLabel = select.getAttribute('aria-label');
+        if (ariaLabel?.trim()) label = ariaLabel.trim();
+      }
+      if (!label) {
+        const labelledBy = select.getAttribute('aria-labelledby');
+        if (labelledBy) {
+          const el = document.getElementById(labelledBy);
+          if (el) label = el.textContent?.trim() || '';
+        }
+      }
+
+      // Strategy 4: Previous sibling text (LinkedIn often puts question as a sibling element)
+      if (!label) {
+        let prev = select.parentElement?.previousElementSibling || select.previousElementSibling;
+        if (prev) {
+          const text = prev.textContent?.trim();
+          if (text && text.length > 5) label = text;
+        }
+      }
+
+      results.push({ index: idx, label, options: opts, currentValue });
+    });
+    return results;
+  }).catch(() => [] as Array<{ index: number; label: string; options: string[]; currentValue: string }>);
+
+  for (const selectInfo of selectData) {
+    // Skip already-filled selects
+    if (selectInfo.currentValue && selectInfo.currentValue !== '') continue;
+
+    if (!selectInfo.label) {
+      sendLog({ level: 'warn', stage: 'apply', message: `Select #${selectInfo.index}: no label found, options: [${selectInfo.options.join(', ')}]`, meta: { jobId } });
+      continue;
     }
+
+    const select = modal.locator('select').nth(selectInfo.index);
+    let answer = answerQuestion(selectInfo.label, config);
+
+    if (!answer) {
+      if (config.useAI && config.openaiApiKey) {
+        // AI fallback — answers based on resume/profile context
+        answer = await askAI(selectInfo.label, selectInfo.options, config);
+      } else {
+        // No AI: auto-Yes for Yes/No qualification questions
+        const hasYes = selectInfo.options.some(o => o.toLowerCase() === 'yes');
+        const hasNo = selectInfo.options.some(o => o.toLowerCase() === 'no');
+        if (hasYes && hasNo) {
+          answer = 'Yes';
+          sendLog({ level: 'info', stage: 'apply', message: `Auto-Yes (AI off): "${selectInfo.label.slice(0, 70)}"`, meta: { jobId } });
+        }
+      }
+    }
+
     if (answer) {
       let selected = false;
       // Try exact label match
       try { await select.selectOption({ label: answer }); selected = true; } catch { /* try next */ }
       // Try partial match on option text
       if (!selected) {
-        const match = options.find(o => o.toLowerCase().trim().includes(answer!.toLowerCase()));
+        const match = selectInfo.options.find(o => o.toLowerCase().trim().includes(answer!.toLowerCase()));
         if (match) {
           try { await select.selectOption({ label: match.trim() }); selected = true; } catch { /* skip */ }
         }
       }
+      // Try by value
+      if (!selected) {
+        try { await select.selectOption(answer); selected = true; } catch { /* skip */ }
+      }
       if (selected) {
         filled++;
-        sendLog({ level: 'info', stage: 'apply', message: `Selected "${label}" → "${answer}"`, meta: { jobId } });
+        sendLog({ level: 'info', stage: 'apply', message: `Selected "${selectInfo.label.slice(0, 50)}" → "${answer}"`, meta: { jobId } });
       } else {
-        unanswered.push(label);
+        unanswered.push(selectInfo.label);
       }
     } else {
-      unanswered.push(label);
+      unanswered.push(selectInfo.label);
     }
   }
 
@@ -304,14 +384,29 @@ async function askAI(label: string, options: string[] | null, config: AppConfig)
 
   try {
     const ai = new OpenAI({ apiKey });
-    const resume = config.resume.slice(0, 2000);
+    const resume = config.resume.slice(0, 3000);
 
-    const prompt = `Answer this job application question concisely (1-5 words max).
+    // Build profile context from config
+    const profileContext = [
+      config.profile.firstName && `Name: ${config.profile.firstName} ${config.profile.lastName}`,
+      config.profile.city && `Location: ${config.profile.city}, ${config.profile.state}, ${config.profile.country}`,
+      config.profile.yearsOfExperience && `Years of experience: ${config.profile.yearsOfExperience}`,
+    ].filter(Boolean).join('\n');
+
+    const hasOptions = options && options.length > 0;
+    const prompt = `You are filling out a job application form on behalf of a candidate.
+Answer this question based on the candidate's resume and profile. Be honest and accurate.
+
 Question: "${label}"
-${options && options.length > 0 ? `Options: ${options.join(', ')}` : ''}
-Context about the candidate:
+${hasOptions ? `Available options (you MUST pick one of these EXACTLY as written): ${options.join(', ')}` : 'Provide a concise answer (1-5 words max).'}
+
+Candidate profile:
+${profileContext}
+
+Candidate resume:
 ${resume}
-Answer only the value, nothing else.`;
+
+${hasOptions ? 'Reply with ONLY the exact option text, nothing else.' : 'Reply with ONLY the answer value, nothing else.'}`;
 
     sendLog({ level: 'info', stage: 'apply', message: `Asking AI: "${label}"...` });
     const response = await ai.chat.completions.create({
