@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { scoreJobMatch } from '../lib/scoring';
 import type { WorkerMessage, ParentMessage, LogEvent, ExecutionStats } from '../lib/types';
+import OpenAI from 'openai';
+import { loadConfig, type AppConfig } from '../lib/config';
 
 // ── IPC helpers ──────────────────────────────────────────────────────
 
@@ -81,6 +83,255 @@ async function waitForSelector(page: Page, selector: string, timeoutMs = 10000):
   }
 }
 
+// ── Config & form filling ────────────────────────────────────────────
+
+function answerQuestion(label: string, config: AppConfig): string | null {
+  const l = label.toLowerCase();
+
+  // 1. Custom answers first (user has priority)
+  for (const rule of config.customAnswers) {
+    if (rule.keywords.some(k => l.includes(k.toLowerCase()))) return rule.answer;
+  }
+
+  // 2. Profile-based keyword matching
+  if (l.includes('first name') || l.includes('given name')) return config.profile.firstName;
+  if (l.includes('last name') || l.includes('surname') || l.includes('family name')) return config.profile.lastName;
+  if ((l.includes('phone') || l.includes('mobile') || l.includes('telefone')) && !l.includes('type')) return config.profile.phone;
+  if (l.includes('city') || l.includes('cidade')) return config.profile.city;
+  if ((l.includes('state') || l.includes('province') || l.includes('estado')) && !l.includes('united')) return config.profile.state;
+  if (l.includes('country') || l.includes('país')) return config.profile.country;
+  if (l.includes('linkedin')) return config.profile.linkedinUrl;
+  if ((l.includes('website') || l.includes('portfolio') || l.includes('github') || l.includes('personal url')) && !l.includes('linkedin')) return config.profile.portfolioUrl;
+  if (l.includes('experience') || l.includes('years')) return config.profile.yearsOfExperience;
+  if (l.includes('salary') && l.includes('current')) return config.profile.currentSalary;
+  if (l.includes('salary') || l.includes('compensation') || l.includes('pay') || l.includes('expected')) return config.profile.desiredSalary;
+  if (l.includes('notice') || l.includes('start date') || l.includes('availability') || l.includes('when can you')) return config.profile.noticePeriodDays;
+
+  // 3. Compliance/EEO
+  if (l.includes('visa') || l.includes('sponsorship') || l.includes('authorization') || l.includes('authorisation') || l.includes('legally') || l.includes('work permit')) return config.compliance.requireVisa;
+  if (l.includes('gender') || l.includes('sex')) return config.compliance.gender;
+  if (l.includes('race') || l.includes('ethnic')) return config.compliance.ethnicity;
+  if (l.includes('disability') || l.includes('disabled') || l.includes('handicap')) return config.compliance.disability;
+  if (l.includes('veteran') || l.includes('military')) return config.compliance.veteran;
+  if (l.includes('citizen')) return config.compliance.usCitizenship;
+
+  // 4. Free text
+  if (l.includes('headline') || l.includes('professional title')) return config.freeText.headline;
+  if (l.includes('summary') || l.includes('about yourself') || l.includes('introduce')) return config.freeText.summary;
+  if (l.includes('cover letter') || l.includes('why do you want') || l.includes('motivation') || l.includes('why are you interested')) return config.freeText.coverLetter;
+
+  return null;
+}
+
+async function getFieldLabel(page: Page, element: ReturnType<typeof page.locator>): Promise<string> {
+  try {
+    // Try aria-label
+    const ariaLabel = await element.getAttribute('aria-label');
+    if (ariaLabel?.trim()) return ariaLabel.trim();
+
+    // Try associated label via id
+    const id = await element.getAttribute('id');
+    if (id) {
+      const label = page.locator(`label[for="${id}"]`).first();
+      const text = await label.textContent().catch(() => '');
+      if (text?.trim()) return text.trim();
+    }
+
+    // Try parent form element label (LinkedIn-specific)
+    const parentLabel = await element.evaluate((el: Element) => {
+      let node = el.parentElement;
+      while (node && !node.classList.contains('fb-dash-form-element') && !node.classList.contains('jobs-easy-apply-form-element')) {
+        node = node.parentElement;
+      }
+      if (node) {
+        const lbl = node.querySelector('.fb-dash-form-element__label, label, .artdeco-text-input--label');
+        return lbl?.textContent?.trim() || '';
+      }
+      return '';
+    }).catch(() => '');
+    if (parentLabel) return parentLabel;
+
+    // Try placeholder
+    const placeholder = await element.getAttribute('placeholder');
+    if (placeholder?.trim()) return placeholder.trim();
+
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+async function fillFormFields(page: Page, config: AppConfig, jobId: string): Promise<{ filled: number; unanswered: string[] }> {
+  const modal = page.locator('.jobs-easy-apply-modal, .artdeco-modal').first();
+  let filled = 0;
+  const unanswered: string[] = [];
+
+  // 1. Text inputs
+  const textInputs = modal.locator('input[type="text"]:not([readonly]):visible, input:not([type]):not([readonly]):visible');
+  const textCount = await textInputs.count().catch(() => 0);
+  for (let i = 0; i < textCount; i++) {
+    const input = textInputs.nth(i);
+    if (!await input.isVisible().catch(() => false)) continue;
+    const value = await input.inputValue().catch(() => '');
+    if (value.trim()) continue;
+
+    const label = await getFieldLabel(page, input);
+    if (!label) continue;
+
+    let answer = answerQuestion(label, config);
+    if (!answer && config.useAI && config.openaiApiKey) {
+      answer = await askAI(label, null, config);
+      if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered "${label}" → "${answer}"`, meta: { jobId } });
+    }
+    if (answer) {
+      await input.fill(answer);
+      filled++;
+    } else {
+      unanswered.push(label);
+    }
+  }
+
+  // 2. Textareas
+  const textareas = modal.locator('textarea:visible');
+  const taCount = await textareas.count().catch(() => 0);
+  for (let i = 0; i < taCount; i++) {
+    const ta = textareas.nth(i);
+    if (!await ta.isVisible().catch(() => false)) continue;
+    const value = await ta.inputValue().catch(() => '');
+    if (value.trim()) continue;
+
+    const label = await getFieldLabel(page, ta);
+    if (!label) continue;
+
+    let answer = answerQuestion(label, config);
+    if (!answer && config.useAI && config.openaiApiKey) {
+      answer = await askAI(label, null, config);
+      if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered "${label}" (textarea)`, meta: { jobId } });
+    }
+    if (answer) {
+      await ta.fill(answer);
+      filled++;
+      sendLog({ level: 'info', stage: 'apply', message: `Filled "${label}" (textarea)`, meta: { jobId } });
+    } else {
+      unanswered.push(label);
+    }
+  }
+
+  // 3. Select dropdowns
+  const selects = modal.locator('select:visible');
+  const selectCount = await selects.count().catch(() => 0);
+  for (let i = 0; i < selectCount; i++) {
+    const select = selects.nth(i);
+    if (!await select.isVisible().catch(() => false)) continue;
+    const currentVal = await select.inputValue().catch(() => '');
+    if (currentVal && currentVal !== '' && currentVal !== 'Select an option') continue;
+
+    const label = await getFieldLabel(page, select);
+    if (!label) continue;
+
+    const options = await select.locator('option').allTextContents().catch(() => [] as string[]);
+    let answer = answerQuestion(label, config);
+    if (!answer && config.useAI && config.openaiApiKey) {
+      answer = await askAI(label, options.filter(o => o.trim()), config);
+      if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered select "${label}" → "${answer}"`, meta: { jobId } });
+    }
+    if (answer) {
+      let selected = false;
+      // Try exact label match
+      try { await select.selectOption({ label: answer }); selected = true; } catch { /* try next */ }
+      // Try partial match on option text
+      if (!selected) {
+        const match = options.find(o => o.toLowerCase().trim().includes(answer!.toLowerCase()));
+        if (match) {
+          try { await select.selectOption({ label: match.trim() }); selected = true; } catch { /* skip */ }
+        }
+      }
+      if (selected) {
+        filled++;
+        sendLog({ level: 'info', stage: 'apply', message: `Selected "${label}" → "${answer}"`, meta: { jobId } });
+      } else {
+        unanswered.push(label);
+      }
+    } else {
+      unanswered.push(label);
+    }
+  }
+
+  // 4. Radio buttons (fieldsets)
+  const fieldsets = modal.locator('fieldset:visible');
+  const fsCount = await fieldsets.count().catch(() => 0);
+  for (let i = 0; i < fsCount; i++) {
+    const fieldset = fieldsets.nth(i);
+    const checked = await fieldset.locator('input[type="radio"]:checked').count().catch(() => 0);
+    if (checked > 0) continue;
+
+    const legend = await fieldset.locator('legend, .fb-dash-form-element__label, span[data-test-form-builder-radio-button-form-component__title]').first().textContent().catch(() => '');
+    if (!legend?.trim()) continue;
+
+    const radioLabels = fieldset.locator('label');
+    const labelTexts = await radioLabels.allTextContents().catch(() => [] as string[]);
+
+    let answer = answerQuestion(legend.trim(), config);
+    if (!answer && config.useAI && config.openaiApiKey) {
+      answer = await askAI(legend.trim(), labelTexts.map(t => t.trim()).filter(Boolean), config);
+      if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered radio "${legend.trim()}" → "${answer}"`, meta: { jobId } });
+    }
+    if (answer) {
+      let clicked = false;
+      const labelCount = await radioLabels.count();
+      for (let j = 0; j < labelCount; j++) {
+        const labelText = await radioLabels.nth(j).textContent().catch(() => '');
+        if (labelText?.toLowerCase().trim().includes(answer.toLowerCase())) {
+          await radioLabels.nth(j).click();
+          filled++;
+          clicked = true;
+          sendLog({ level: 'info', stage: 'apply', message: `Selected radio "${legend.trim()}" → "${labelText.trim()}"`, meta: { jobId } });
+          break;
+        }
+      }
+      if (!clicked) unanswered.push(legend.trim());
+    } else {
+      unanswered.push(legend.trim());
+    }
+  }
+
+  return { filled, unanswered };
+}
+
+async function askAI(label: string, options: string[] | null, config: AppConfig): Promise<string | null> {
+  const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY;
+  if (!config.useAI || !apiKey) return null;
+
+  try {
+    const ai = new OpenAI({ apiKey });
+    const resume = config.resume.slice(0, 2000);
+
+    const prompt = `Answer this job application question concisely (1-5 words max).
+Question: "${label}"
+${options && options.length > 0 ? `Options: ${options.join(', ')}` : ''}
+Context about the candidate:
+${resume}
+Answer only the value, nothing else.`;
+
+    sendLog({ level: 'info', stage: 'apply', message: `Asking AI: "${label}"...` });
+    const response = await ai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0.1,
+      max_tokens: 50,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const answer = response.choices[0].message.content?.trim() || null;
+    if (answer) {
+      sendLog({ level: 'info', stage: 'apply', message: `AI Result: "${label}" → "${answer}"` });
+    }
+    return answer;
+  } catch (err) {
+    sendLog({ level: 'warn', stage: 'apply', message: `AI fallback failed: ${err instanceof Error ? err.message : String(err)}` });
+    return null;
+  }
+}
+
 // ── Main execution ───────────────────────────────────────────────────
 
 async function main() {
@@ -88,30 +339,45 @@ async function main() {
   let context: any = null;
 
   try {
-    // Check resume file before starting
-    const resumePath = path.resolve(process.env.RESUME_PATH || './data/resume.txt');
-    try {
-      const resumeContent = fs.readFileSync(resumePath, 'utf-8');
-      if (resumeContent.includes('Placeholder resume') || resumeContent.trim().length < 100) {
-        sendLog({
-          level: 'error',
-          stage: 'system',
-          message: `WARNING: resume.txt is placeholder or too short (${resumeContent.trim().length} chars). Edit data/resume.txt with your real resume! All scores will be 0.`,
-        });
-      } else {
-        sendLog({
-          level: 'info',
-          stage: 'system',
-          message: `Resume loaded: ${resumeContent.trim().length} chars`,
-        });
-      }
-    } catch (err) {
-      sendLog({
-        level: 'error',
-        stage: 'system',
-        message: `Cannot read resume file at ${resumePath}: ${err instanceof Error ? err.message : String(err)}`,
-      });
+    // Load config
+    const config = loadConfig();
+    sendLog({ level: 'info', stage: 'system', message: `Config loaded: AI=${config.useAI}, scoring=${config.useScoreMatching}(threshold=${config.scoreThreshold}), customAnswers=${config.customAnswers.length}, profile=${config.profile.firstName ? 'set' : 'empty'}` });
+
+    // 1. Validate LinkedIn Credentials
+    const lnEmail = config.linkedinEmail || process.env.LINKEDIN_EMAIL;
+    const lnPassword = config.linkedinPassword || process.env.LINKEDIN_PASSWORD;
+    if (!lnEmail || !lnPassword) {
+      sendLog({ level: 'error', stage: 'system', message: 'CRITICAL ERROR: LinkedIn credentials missing. Set them in the Configuration page.' });
+      sendDone('error', stats);
+      return;
     }
+
+    // 2. Validate OpenAI API Key (only if AI/Scoring is enabled)
+    if (config.useAI || config.useScoreMatching) {
+      const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        sendLog({ level: 'error', stage: 'system', message: 'CRITICAL ERROR: OpenAI API Key missing but AI features are enabled. Disable AI features or provide a key.' });
+        sendDone('error', stats);
+        return;
+      }
+    }
+
+    // 3. Validate Resume
+    let resumeContent = config.resume;
+    if (!resumeContent || resumeContent.trim().length < 50) {
+      const resumePath = path.resolve(process.env.RESUME_PATH || './data/resume.txt');
+      try {
+        resumeContent = fs.readFileSync(resumePath, 'utf-8');
+      } catch { /* no file */ }
+    }
+
+    if (!resumeContent || resumeContent.trim().length < 100) {
+      sendLog({ level: 'error', stage: 'system', message: 'CRITICAL ERROR: Resume is missing or too short. Please provide a valid resume in the Configuration page.' });
+      sendDone('error', stats);
+      return;
+    }
+
+    sendLog({ level: 'info', stage: 'system', message: `Validation passed. Resume loaded: ${resumeContent.trim().length} chars` });
 
     sendLog({ level: 'info', stage: 'system', message: 'Launching browser...' });
 
@@ -152,7 +418,7 @@ async function main() {
 
     // If cookies didn't work or don't exist, login fresh
     if (!cookiesLoaded) {
-      await loginToLinkedIn(page);
+      await loginToLinkedIn(page, config);
     }
 
     if (shouldStop) { sendDone('finished', stats); return; }
@@ -185,7 +451,7 @@ async function main() {
       }
 
       try {
-        await processJob(page, jobUrl);
+        await processJob(page, jobUrl, config);
       } catch (err) {
         sendLog({
           level: 'error',
@@ -223,12 +489,19 @@ async function main() {
 
 // ── LinkedIn Actions ─────────────────────────────────────────────────
 
-async function loginToLinkedIn(page: Page) {
+async function loginToLinkedIn(page: Page, config: AppConfig) {
   sendLog({ level: 'info', stage: 'system', message: 'Logging in to LinkedIn...' });
   await page.goto('https://www.linkedin.com/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-  await page.fill('#username', process.env.LINKEDIN_EMAIL!);
-  await page.fill('#password', process.env.LINKEDIN_PASSWORD!);
+  const email = config.linkedinEmail || process.env.LINKEDIN_EMAIL;
+  const password = config.linkedinPassword || process.env.LINKEDIN_PASSWORD;
+
+  if (!email || !password) {
+    throw new Error('LinkedIn credentials missing. Please set them in the Configuration page.');
+  }
+
+  await page.fill('#username', email);
+  await page.fill('#password', password);
   await page.click('[data-litms-control-urn="login-submit"]');
 
   // Wait for the URL to leave /login — poll-based to avoid waitForURL load timeout
@@ -257,25 +530,36 @@ async function collectJobLinks(page: Page, searchUrl: string, maxPages = 3): Pro
   const allLinks: string[] = [];
 
   // Strip any existing `start` param so we control pagination cleanly
-  const baseUrl = searchUrl.replace(/[?&]start=\d+/, '').replace(/[?&]currentJobId=\d+/, '');
+  const baseUrl = searchUrl.replace(/[?&]start=\d+/, '');
   const separator = baseUrl.includes('?') ? '&' : '?';
 
   for (let pageNum = 0; pageNum < maxPages; pageNum++) {
     if (shouldStop) break;
 
     const pageUrl = pageNum === 0
-      ? `${baseUrl}${separator}start=0`
+      ? `${baseUrl}`
       : `${baseUrl}${separator}start=${pageNum * 25}`;
 
     sendLog({ level: 'info', stage: 'fetch', message: `Loading page ${pageNum + 1} of ${maxPages}...`, meta: { url: pageUrl } });
 
     await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
+
+
     // Wait for job cards to render
-    const loaded = await waitForSelector(page, '.job-card-container, .jobs-search-results-list, .scaffold-layout__list', 12000);
+    let loaded
+    loaded = await waitForSelector(page, '.job-card-container, .jobs-search-results-list, .scaffold-layout__list', 12000);
     if (!loaded) {
       sendLog({ level: 'warn', stage: 'fetch', message: `Page ${pageNum + 1}: job cards not detected, skipping` });
+      sendLog({ level: 'warn', stage: 'fetch', message: `Retrying....` });
+
+      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      loaded = await waitForSelector(page, '.job-card-container, .jobs-search-results-list, .scaffold-layout__list', 12000);
+      if (!loaded) {
+        sendLog({ level: 'warn', stage: 'fetch', message: `Retry failed` });
+
       break;
+      }
     }
 
     // Scroll the LEFT job list panel (not the job detail pane on the right).
@@ -352,7 +636,7 @@ async function collectJobLinks(page: Page, searchUrl: string, maxPages = 3): Pro
   return allLinks;
 }
 
-async function processJob(page: Page, jobUrl: string) {
+async function processJob(page: Page, jobUrl: string, config: AppConfig) {
   const jobId = jobUrl.match(/\/view\/(\d+)/)?.[1] || 'unknown';
 
   sendLog({
@@ -435,35 +719,44 @@ async function processJob(page: Page, jobUrl: string) {
     });
   }
 
-  // Score with GPT
-  const scoring = await scoreJobMatch(jobTitle.trim(), jobDescription.trim(), companyName.trim());
+  // Score with GPT (if enabled)
+  if (config.useScoreMatching) {
+    const scoring = await scoreJobMatch(jobTitle.trim(), jobDescription.trim(), companyName.trim(), config.scoreThreshold);
 
-  // Log score with reasoning visible in the message itself
-  const concernsStr = scoring.concerns.length > 0 ? ` | Issues: ${scoring.concerns.join(', ')}` : '';
-  const matchesStr = scoring.keyMatches.length > 0 ? ` | Matches: ${scoring.keyMatches.join(', ')}` : '';
-  sendLog({
-    level: scoring.shouldApply ? 'success' : 'warn',
-    stage: 'scoring',
-    message: `Score ${scoring.score}/100 — ${scoring.reasoning}${concernsStr}${matchesStr}`,
-    meta: {
-      jobId,
-      match_score: scoring.score,
-      shouldApply: scoring.shouldApply,
-      reasoning: scoring.reasoning,
-      keyMatches: scoring.keyMatches,
-      concerns: scoring.concerns,
-    },
-  });
+    // Log score with reasoning visible in the message itself
+    const concernsStr = scoring.concerns.length > 0 ? ` | Issues: ${scoring.concerns.join(', ')}` : '';
+    const matchesStr = scoring.keyMatches.length > 0 ? ` | Matches: ${scoring.keyMatches.join(', ')}` : '';
+    sendLog({
+      level: scoring.shouldApply ? 'success' : 'warn',
+      stage: 'scoring',
+      message: `Score ${scoring.score}/100 — ${scoring.reasoning}${concernsStr}${matchesStr}`,
+      meta: {
+        jobId,
+        match_score: scoring.score,
+        shouldApply: scoring.shouldApply,
+        reasoning: scoring.reasoning,
+        keyMatches: scoring.keyMatches,
+        concerns: scoring.concerns,
+      },
+    });
 
-  if (!scoring.shouldApply) {
-    stats.discardedJobs++;
+    if (!scoring.shouldApply) {
+      stats.discardedJobs++;
+      sendLog({
+        level: 'info',
+        stage: 'decision',
+        message: `Skipping job: score ${scoring.score} below threshold`,
+        meta: { jobId },
+      });
+      return;
+    }
+  } else {
     sendLog({
       level: 'info',
-      stage: 'decision',
-      message: `Skipping job: score ${scoring.score} below threshold`,
+      stage: 'scoring',
+      message: `Score matching disabled — skipping GPT scoring, proceeding to apply`,
       meta: { jobId },
     });
-    return;
   }
 
   // Attempt Easy Apply — target the specific button using its unique data attribute
@@ -526,7 +819,7 @@ async function processJob(page: Page, jobUrl: string) {
     message: `Easy Apply button found via "${foundSelector}", clicking...`,
     meta: { jobId },
   });
-  await attemptEasyApply(page, jobTitle.trim(), jobId, easyApplyButton);
+  await attemptEasyApply(page, jobTitle.trim(), jobId, easyApplyButton, config);
 }
 
 async function extractText(page: Page, selectors: string[]): Promise<string | null> {
@@ -546,7 +839,7 @@ async function extractText(page: Page, selectors: string[]): Promise<string | nu
   return null;
 }
 
-async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, applyBtn: ReturnType<typeof page.locator>) {
+async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, applyBtn: ReturnType<typeof page.locator>, config: AppConfig) {
   sendLog({ level: 'info', stage: 'apply', message: `Starting Easy Apply for "${jobTitle}"`, meta: { jobId } });
 
   try {
@@ -565,6 +858,22 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
     // Wait for the Easy Apply modal to appear
     const modalLoaded = await waitForSelector(page, '.jobs-easy-apply-modal, .artdeco-modal', 5000);
     if (!modalLoaded) {
+      // Check for daily limit message (seen in screenshot)
+      const dailyLimitText = await page.evaluate(() => {
+        const bodyText = document.body.innerText;
+        return bodyText.includes('limit daily submissions') || bodyText.includes('apply tomorrow');
+      });
+
+      if (dailyLimitText) {
+        sendLog({
+          level: 'error',
+          stage: 'system',
+          message: '🔴 LIMITE DIÁRIO ATINGIDO: O LinkedIn bloqueou novas candidaturas por hoje para evitar comportamento automatizado. Por favor, tente novamente amanhã.',
+        });
+        shouldStop = true;
+        return;
+      }
+
       sendLog({ level: 'warn', stage: 'apply', message: 'Easy Apply modal did not appear', meta: { jobId } });
       stats.manualJobs++;
       return;
@@ -580,6 +889,28 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
         stats.manualJobs++;
         return;
       }
+
+      // Fill form fields on the current page before clicking any buttons
+      const { filled, unanswered } = await fillFormFields(page, config, jobId);
+      if (filled > 0) {
+        sendLog({ level: 'info', stage: 'apply', message: `Filled ${filled} field(s) on this step`, meta: { jobId } });
+      }
+      if (unanswered.length > 0) {
+        sendLog({ level: 'warn', stage: 'apply', message: `Questions without answers: ${unanswered.join(', ')}`, meta: { jobId, unanswered } });
+      }
+
+      // Check for validation errors IF we have unanswered questions or just filled something
+      const errorMsg = page.locator('.artdeco-inline-feedback--error, .artdeco-text-input--error, .fb-dash-form-element--error, [data-test-form-element-error]').first();
+      if (await errorMsg.isVisible().catch(() => false)) {
+        const text = await errorMsg.textContent();
+        sendLog({ level: 'warn', stage: 'apply', message: `Form has errors: "${text?.trim()}" — Skipping job to save time.`, meta: { jobId } });
+        stats.needsInfoJobs++;
+        await closeModal(page);
+        return;
+      }
+
+      // Small delay after filling to let LinkedIn validate
+      if (filled > 0) await page.waitForTimeout(500);
 
       // Check for submit button (multiple possible aria-labels)
       const submitButton = page.locator('button[aria-label="Submit application"], button[aria-label="Enviar candidatura"]').first();

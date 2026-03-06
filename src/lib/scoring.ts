@@ -1,13 +1,34 @@
 import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
+import { loadConfig } from './config';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openaiClient: OpenAI | null = null;
+
+function getOpenAI(): OpenAI {
+  if (!openaiClient) {
+    let apiKey = process.env.OPENAI_API_KEY || '';
+    try {
+      const config = loadConfig();
+      if (config.openaiApiKey) apiKey = config.openaiApiKey;
+    } catch { /* use env */ }
+    openaiClient = new OpenAI({ apiKey });
+  }
+  return openaiClient;
+}
 
 let cachedResume: string | null = null;
 
 function getResume(): string {
   if (!cachedResume) {
+    // Prefer config resume, fall back to file
+    try {
+      const config = loadConfig();
+      if (config.resume && config.resume.trim().length > 50) {
+        cachedResume = config.resume;
+        return cachedResume;
+      }
+    } catch { /* fall back to file */ }
     const resumePath = process.env.RESUME_PATH || './data/resume.txt';
     cachedResume = fs.readFileSync(path.resolve(resumePath), 'utf-8');
   }
@@ -25,10 +46,11 @@ export interface ScoringResult {
 export async function scoreJobMatch(
   jobTitle: string,
   jobDescription: string,
-  companyName: string
+  companyName: string,
+  thresholdOverride?: number
 ): Promise<ScoringResult> {
   const resume = getResume();
-  const threshold = parseInt(process.env.MATCH_SCORE_THRESHOLD || '60', 10);
+  const threshold = thresholdOverride ?? parseInt(process.env.MATCH_SCORE_THRESHOLD || '60', 10);
 
   // Warn if resume is still placeholder
   if (resume.includes('Placeholder resume') || resume.trim().length < 100) {
@@ -40,7 +62,7 @@ export async function scoreJobMatch(
     console.warn('[scoring] WARNING: job description is empty or very short (' + (jobDescription?.trim().length || 0) + ' chars). Score may be inaccurate.');
   }
 
-  const response = await openai.chat.completions.create({
+  const response = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     temperature: 0.1,
     response_format: { type: 'json_object' },
