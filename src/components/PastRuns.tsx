@@ -53,11 +53,14 @@ export function PastRuns({ currentRunId, onLoadRun }: Props) {
   };
 
   return (
-    <div className="rounded-xl bg-gray-900/80 border border-gray-800/60 overflow-hidden">
-      <div className="px-4 py-3 border-b border-gray-800/60 bg-gray-900/50">
-        <span className="text-xs font-semibold text-gray-300 tracking-wide">History</span>
+    <div className="panel">
+      <div className="panel-header">
+        <div>
+          <div className="panel-title">History</div>
+          <div className="panel-kicker">Recent executions from this machine.</div>
+        </div>
       </div>
-      <div className="divide-y divide-gray-800/40 max-h-52 overflow-y-auto">
+      <div className="divide-y divide-white/5 max-h-52 overflow-y-auto scrollbar-soft">
         {runs.map((run) => {
           const isCurrent = run.runId === currentRunId;
           const d = new Date(run.startedAt);
@@ -68,23 +71,23 @@ export function PastRuns({ currentRunId, onLoadRun }: Props) {
             <button
               key={run.runId}
               onClick={() => onLoadRun(run.runId)}
-              className={`w-full flex items-center gap-4 px-4 py-2.5 text-left hover:bg-gray-800/30 transition-colors ${
-                isCurrent ? 'bg-blue-600/5 border-l-2 border-blue-500' : 'border-l-2 border-transparent'
+              className={`w-full flex items-center gap-4 px-4 py-3 text-left hover:bg-white/[0.03] transition-colors ${
+                isCurrent ? 'bg-[rgba(87,230,255,0.04)] border-l-2 border-[var(--accent)]' : 'border-l-2 border-transparent'
               }`}
             >
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusDots[run.status] || 'bg-gray-600'}`} />
-                <span className="text-xs text-gray-400 font-mono tabular-nums whitespace-nowrap">{dateStr} {timeStr}</span>
+                <span className="text-xs text-[var(--text-faint)] font-mono tabular-nums whitespace-nowrap">{dateStr} {timeStr}</span>
                 <span className={`text-[10px] font-semibold capitalize ${statusColors[run.status] || 'text-gray-500'}`}>
                   {run.status}
                 </span>
               </div>
               <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums shrink-0 ml-auto">
-                <span className="text-gray-500">{run.stats.totalJobs} total</span>
-                <span className="text-emerald-500">{run.stats.appliedJobs}</span>
-                <span className="text-orange-500">{run.stats.needsInfoJobs || 0}</span>
-                <span className="text-amber-500">{run.stats.manualJobs}</span>
-                <span className="text-red-500">{run.stats.discardedJobs}</span>
+                <span className="text-[var(--text-faint)]">{run.stats.totalJobs} total</span>
+                <span className="text-emerald-400">{run.stats.appliedJobs}</span>
+                <span className="text-orange-400">{run.stats.needsInfoJobs || 0}</span>
+                <span className="text-amber-400">{run.stats.manualJobs}</span>
+                <span className="text-red-400">{run.stats.discardedJobs}</span>
               </div>
             </button>
           );

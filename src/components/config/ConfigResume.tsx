@@ -26,32 +26,39 @@ export function ConfigResume({ resume, onChange }: Props) {
   const [showPrompt, setShowPrompt] = useState(false);
 
   return (
-    <section className="rounded-xl bg-gray-900/80 border border-gray-800/60 p-6">
-      <div className="flex items-center justify-between mb-1">
-        <h2 className="text-sm font-bold text-white">Resume</h2>
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <div className="panel-title">Resume</div>
+          <div className="panel-kicker">Plain text input for scoring and autofill.</div>
+        </div>
         <button
           onClick={() => setShowPrompt(!showPrompt)}
-          className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors"
+          className="btn-ghost text-[10px] font-semibold"
         >
           {showPrompt ? 'Hide prompt' : 'How to format?'}
         </button>
       </div>
-      <p className="text-[11px] text-gray-600 mb-5">Paste your resume in plain text. Used for AI scoring and form filling context.</p>
+      <div className="panel-body">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="sr-only">Resume</h2>
+      </div>
+      <p className="text-[11px] text-[var(--text-faint)] mb-5">Paste your resume in plain text. Used for AI scoring and form filling context.</p>
 
       {showPrompt && (
-        <div className="mb-4 p-4 bg-gray-800/50 border border-gray-700/50 rounded-lg">
+        <div className="mb-4 p-4 bg-white/[0.03] border border-white/5 rounded-xl">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">
+            <span className="text-[10px] font-semibold text-[var(--text-faint)] uppercase tracking-widest">
               Prompt for ChatGPT
             </span>
             <button
               onClick={() => navigator.clipboard.writeText(PROMPT_TEXT)}
-              className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors"
+              className="text-[10px] font-semibold text-[var(--accent)] hover:opacity-80 transition-colors"
             >
               Copy
             </button>
           </div>
-          <pre className="text-[11px] text-gray-400 font-mono whitespace-pre-wrap leading-relaxed">{PROMPT_TEXT}</pre>
+          <pre className="text-[11px] text-[var(--text)]/80 font-mono whitespace-pre-wrap leading-relaxed">{PROMPT_TEXT}</pre>
         </div>
       )}
 
@@ -60,13 +67,12 @@ export function ConfigResume({ resume, onChange }: Props) {
         onChange={(e) => onChange(e.target.value)}
         placeholder="Paste your plain-text resume here..."
         rows={12}
-        className="w-full px-3 py-3 bg-gray-800/50 border border-gray-700/50 rounded-lg text-white text-sm font-mono
-                   placeholder-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20
-                   resize-y min-h-[200px]"
+        className="field-textarea font-mono resize-y min-h-[200px]"
       />
-      <p className="text-[10px] text-gray-600 mt-1.5">
+      <p className="text-[10px] text-[var(--text-faint)] mt-1.5">
         {resume.length > 0 ? `${resume.length} characters` : 'Empty'}
       </p>
+      </div>
     </section>
   );
 }

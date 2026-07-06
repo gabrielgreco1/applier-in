@@ -78,7 +78,8 @@ class Orchestrator {
   }> {
     const rows = db.prepare(`
       SELECT id, status, started_at, finished_at, total_jobs, applied_jobs, needs_info_jobs, manual_jobs, discarded_jobs
-      FROM runs ORDER BY started_at DESC LIMIT 50
+      FROM runs
+      ORDER BY started_at DESC LIMIT 50
     `).all() as Array<{
       id: string; status: string; started_at: string; finished_at: string | null;
       total_jobs: number; applied_jobs: number; needs_info_jobs: number; manual_jobs: number; discarded_jobs: number;
@@ -99,7 +100,10 @@ class Orchestrator {
   }
 
   getRun(runId: string) {
-    const run = db.prepare('SELECT id, status, started_at, finished_at, total_jobs, applied_jobs, needs_info_jobs, manual_jobs, discarded_jobs FROM runs WHERE id = ?').get(runId) as {
+    const run = db.prepare(`
+      SELECT id, status, started_at, finished_at, total_jobs, applied_jobs, needs_info_jobs, manual_jobs, discarded_jobs
+      FROM runs WHERE id = ?
+    `).get(runId) as {
       id: string; status: string; started_at: string; finished_at: string | null;
       total_jobs: number; applied_jobs: number; needs_info_jobs: number; manual_jobs: number; discarded_jobs: number;
     } | undefined;
@@ -127,7 +131,7 @@ class Orchestrator {
     };
   }
 
-  start(executionId: string, searchUrl: string, maxPages: number): void {
+  start(executionId: string, searchUrl: string, maxPages: number, easyApplyOnly = false): void {
     if (this.active) {
       throw new Error('An execution is already running');
     }
@@ -146,6 +150,7 @@ class Orchestrator {
         EXECUTION_ID: executionId,
         JOB_SEARCH_URL: searchUrl,
         MAX_PAGES: String(maxPages),
+        EASY_APPLY_ONLY: easyApplyOnly ? '1' : '0',
       },
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     });
@@ -224,10 +229,8 @@ class Orchestrator {
   }
 
   private handleLog(executionId: string, event: LogEvent) {
-    // Persist to SQLite
     insertLog.run(executionId, event.timestamp, event.level, event.stage, event.message, event.meta ? JSON.stringify(event.meta) : null);
 
-    // Track jobs from log meta
     if (event.meta?.jobId) {
       const jobId = event.meta.jobId as string;
       const title = (event.meta.jobTitle as string) || 'Unknown';
@@ -238,6 +241,8 @@ class Orchestrator {
       let reason: string | null = null;
       if (event.stage === 'apply' && event.message.includes('Application submitted')) {
         reason = 'applied';
+      } else if (event.stage === 'decision' && event.message.includes('already marked as applied')) {
+        reason = 'already_applied';
       } else if (event.meta.needsInfo) {
         reason = 'needs_info';
       } else if (event.stage === 'fallback' && event.message.includes('Flagged for manual')) {
@@ -249,7 +254,6 @@ class Orchestrator {
       upsertJob.run(jobId, executionId, title, company, url, score, reason);
     }
 
-    // Emit to SSE subscribers
     logBus.emitLog(executionId, event);
   }
 
@@ -284,6 +288,17 @@ class Orchestrator {
   }
 }
 
-const g = globalThis as unknown as { orchestrator: Orchestrator };
-export const orchestrator = g.orchestrator ?? new Orchestrator();
-g.orchestrator = orchestrator;
+// Version tag — bump this any time the start() signature or DB schema changes.
+// This forces the globalThis singleton to be recreated on hot-reload so
+// the old in-memory instance with a stale method signature is never reused.
+const ORCH_VERSION = 'v5-local-only';
+
+const g = globalThis as unknown as { orchestrator: Orchestrator; _orchVer: string };
+
+if (g._orchVer !== ORCH_VERSION) {
+  // Code changed — recreate the singleton so argument order is always correct.
+  g.orchestrator = new Orchestrator();
+  g._orchVer = ORCH_VERSION;
+}
+
+export const orchestrator = g.orchestrator;

@@ -23,7 +23,19 @@ export interface AppConfig {
     yearsOfExperience: string;
     currentSalary: string;
     desiredSalary: string;
+    acceptOnSite: string;
     noticePeriodDays: string;
+  };
+  education: {
+    school: string;
+    city: string;
+    degree: string;
+    major: string;
+    startMonth: string;
+    startYear: string;
+    endMonth: string;
+    endYear: string;
+    currentlyAttending: boolean;
   };
   compliance: {
     requireVisa: string;
@@ -62,7 +74,19 @@ export function getDefaultConfig(): AppConfig {
       yearsOfExperience: "",
       currentSalary: "",
       desiredSalary: "",
+      acceptOnSite: "Yes",
       noticePeriodDays: "",
+    },
+    education: {
+      school: "",
+      city: "",
+      degree: "",
+      major: "",
+      startMonth: "",
+      startYear: "",
+      endMonth: "",
+      endYear: "",
+      currentlyAttending: false,
     },
     compliance: {
       requireVisa: "No",

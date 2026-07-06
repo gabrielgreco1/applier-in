@@ -6,7 +6,7 @@ interface Profile {
   firstName: string; lastName: string; phone: string;
   city: string; state: string; country: string;
   linkedinUrl: string; portfolioUrl: string;
-  yearsOfExperience: string; currentSalary: string; desiredSalary: string; noticePeriodDays: string;
+  yearsOfExperience: string; currentSalary: string; desiredSalary: string; acceptOnSite: string; noticePeriodDays: string;
 }
 
 interface Compliance {
@@ -32,14 +32,13 @@ function Field({ label, value, onChange, type = 'text', placeholder = '' }: {
 }) {
   return (
     <div>
-      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1">{label}</label>
+      <label className="field-label">{label}</label>
       <input
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-lg text-white text-sm
-                   placeholder-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20"
+        className="field"
       />
     </div>
   );
@@ -50,12 +49,11 @@ function SelectField({ label, value, onChange, options }: {
 }) {
   return (
     <div>
-      <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1">{label}</label>
+      <label className="field-label">{label}</label>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-lg text-white text-sm
-                   focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20"
+        className="field"
       >
         {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
       </select>
@@ -68,9 +66,14 @@ export function ConfigProfile({ profile, compliance, freeText, onProfileChange, 
   const [showFreeText, setShowFreeText] = useState(false);
 
   return (
-    <section className="rounded-xl bg-gray-900/80 border border-gray-800/60 p-6">
-      <h2 className="text-sm font-bold text-white mb-1">Personal Profile</h2>
-      <p className="text-[11px] text-gray-600 mb-5">Used to auto-fill common form fields (name, phone, location, etc.)</p>
+    <section className="panel">
+      <div className="panel-header">
+        <div>
+          <div className="panel-title">Personal Profile</div>
+          <div className="panel-kicker">Used to auto-fill common form fields.</div>
+        </div>
+      </div>
+      <div className="panel-body">
 
       <div className="space-y-4">
         {/* Name */}
@@ -98,6 +101,8 @@ export function ConfigProfile({ profile, compliance, freeText, onProfileChange, 
           <Field label="Years of Experience" value={profile.yearsOfExperience} onChange={(v) => onProfileChange('yearsOfExperience', v)} />
           <Field label="Current Salary" value={profile.currentSalary} onChange={(v) => onProfileChange('currentSalary', v)} />
           <Field label="Desired Salary" value={profile.desiredSalary} onChange={(v) => onProfileChange('desiredSalary', v)} />
+          <SelectField label="Accept On-site Roles" value={profile.acceptOnSite}
+            onChange={(v) => onProfileChange('acceptOnSite', v)} options={['Yes', 'No']} />
           <Field label="Notice Period (days)" value={profile.noticePeriodDays} onChange={(v) => onProfileChange('noticePeriodDays', v)} />
         </div>
 
@@ -113,7 +118,7 @@ export function ConfigProfile({ profile, compliance, freeText, onProfileChange, 
         {/* EEO Collapsible */}
         <button
           onClick={() => setShowEEO(!showEEO)}
-          className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-400 transition-colors"
+          className="flex items-center gap-2 text-xs text-[var(--text-faint)] hover:text-[var(--text)] transition-colors"
         >
           <svg className={`w-3 h-3 transition-transform ${showEEO ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
@@ -122,7 +127,7 @@ export function ConfigProfile({ profile, compliance, freeText, onProfileChange, 
         </button>
 
         {showEEO && (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pl-5 border-l-2 border-gray-800">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pl-5 border-l-2 border-white/5">
             <SelectField label="Gender" value={compliance.gender}
               onChange={(v) => onComplianceChange('gender', v)} options={['Decline', 'Male', 'Female', 'Other']} />
             <SelectField label="Ethnicity" value={compliance.ethnicity}
@@ -137,7 +142,7 @@ export function ConfigProfile({ profile, compliance, freeText, onProfileChange, 
         {/* Free Text Collapsible */}
         <button
           onClick={() => setShowFreeText(!showFreeText)}
-          className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-400 transition-colors"
+          className="flex items-center gap-2 text-xs text-[var(--text-faint)] hover:text-[var(--text)] transition-colors"
         >
           <svg className={`w-3 h-3 transition-transform ${showFreeText ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
@@ -146,22 +151,21 @@ export function ConfigProfile({ profile, compliance, freeText, onProfileChange, 
         </button>
 
         {showFreeText && (
-          <div className="space-y-3 pl-5 border-l-2 border-gray-800">
+          <div className="space-y-3 pl-5 border-l-2 border-white/5">
             <Field label="Headline" value={freeText.headline} onChange={(v) => onFreeTextChange('headline', v)} placeholder="Senior Software Engineer | ..." />
             <div>
-              <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1">Summary</label>
+              <label className="field-label">Summary</label>
               <textarea value={freeText.summary} onChange={(e) => onFreeTextChange('summary', e.target.value)} rows={3}
-                className="w-full px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-lg text-white text-sm
-                           placeholder-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 resize-y" />
+                className="field-textarea resize-y" />
             </div>
             <div>
-              <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-widest mb-1">Cover Letter</label>
+              <label className="field-label">Cover Letter</label>
               <textarea value={freeText.coverLetter} onChange={(e) => onFreeTextChange('coverLetter', e.target.value)} rows={5}
-                className="w-full px-3 py-2 bg-gray-800/50 border border-gray-700/50 rounded-lg text-white text-sm
-                           placeholder-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 resize-y" />
+                className="field-textarea resize-y" />
             </div>
           </div>
         )}
+      </div>
       </div>
     </section>
   );

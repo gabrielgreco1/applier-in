@@ -20,13 +20,16 @@ export function StatsBar({ stats }: Props) {
   ];
 
   return (
-    <div className="grid grid-cols-5 gap-3">
+    <div className="metric-grid">
       {items.map((item) => (
-        <div key={item.label} className="relative overflow-hidden rounded-xl bg-gray-900/80 border border-gray-800/60 px-4 py-3.5">
+        <div key={item.label} className="metric-card enter-rise">
           <div className={`absolute bottom-0 left-0 h-[2px] ${item.bar} transition-all duration-500`}
                style={{ width: stats.totalJobs > 0 ? `${(item.value / stats.totalJobs) * 100}%` : '0%' }} />
-          <div className={`text-2xl font-bold tabular-nums tracking-tight ${item.color}`}>{item.value}</div>
-          <div className="text-[10px] font-semibold uppercase tracking-widest text-gray-500 mt-1">{item.label}</div>
+          <div className={`metric-value ${item.color}`}>{item.value}</div>
+          <div className="metric-label">{item.label}</div>
+          <div className="metric-track">
+            <div className="metric-fill" style={{ width: stats.totalJobs > 0 ? `${(item.value / stats.totalJobs) * 100}%` : '0%' }} />
+          </div>
         </div>
       ))}
     </div>

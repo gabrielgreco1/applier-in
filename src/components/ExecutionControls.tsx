@@ -17,26 +17,22 @@ const STATUS: Record<string, { dot: string; label: string; color: string }> = {
 export function ExecutionControls({ status, onStart, onStop }: Props) {
   const s = STATUS[status];
   return (
-    <div className="flex items-center gap-2.5">
-      <div className="flex items-center gap-1.5 mr-1">
-        <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
+    <div className="button-row">
+      <div className="flex items-center gap-2 mr-1">
+        <span className={`status-dot ${status === 'running' ? 'is-running' : ''} ${s.dot}`} />
         <span className={`text-xs font-medium ${s.color}`}>{s.label}</span>
       </div>
       <button
         onClick={onStop}
         disabled={status !== 'running'}
-        className="h-8 px-4 rounded-lg bg-gray-800/80 hover:bg-gray-700 text-gray-300 text-xs
-                   font-medium transition-all disabled:opacity-20 disabled:cursor-not-allowed
-                   border border-gray-700/50"
+        className="btn-ghost text-xs font-medium disabled:opacity-25 disabled:cursor-not-allowed"
       >
         Stop
       </button>
       <button
         onClick={onStart}
         disabled={status === 'running'}
-        className="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs
-                   font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed
-                   shadow-md shadow-blue-600/25"
+        className="btn-primary text-xs font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {status === 'running' ? 'Running...' : 'Start Run'}
       </button>

@@ -2,15 +2,491 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'AutoApply',
-  description: 'AI-powered LinkedIn job application agent',
+  title: 'AutoApply Local',
+  description: 'Local LinkedIn job automation workspace',
 };
+
+const visualStyles = `
+:root {
+  --bg: #040814;
+  --bg-2: #09111f;
+  --surface: rgba(11, 18, 34, 0.8);
+  --surface-2: rgba(15, 24, 44, 0.88);
+  --surface-3: rgba(19, 31, 56, 0.9);
+  --border: rgba(129, 154, 190, 0.18);
+  --border-strong: rgba(85, 205, 255, 0.26);
+  --text: #e9f2ff;
+  --text-dim: #91a6c8;
+  --text-faint: #64789c;
+  --accent: #57e6ff;
+  --accent-2: #56f59f;
+  --accent-warm: #ffbf57;
+  --danger: #ff6f7d;
+  --success: #48f0aa;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+}
+
+html, body {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(87, 230, 255, 0.12), transparent 26%),
+    radial-gradient(circle at 85% 15%, rgba(86, 245, 159, 0.08), transparent 20%),
+    linear-gradient(180deg, #050914 0%, #040814 40%, #03060d 100%);
+}
+
+body {
+  font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: var(--text);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(to right, rgba(129, 154, 190, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(129, 154, 190, 0.05) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(180deg, rgba(0,0,0,0.52), rgba(0,0,0,0.2) 45%, transparent 100%);
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 0%, rgba(87, 230, 255, 0.08), transparent 35%);
+  opacity: 0.8;
+}
+
+.app-shell {
+  position: relative;
+  z-index: 1;
+  max-width: 1520px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.font-mono {
+  font-family: 'IBM Plex Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+.app-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.studio-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(9, 17, 31, 0.94), rgba(11, 18, 34, 0.82)),
+    linear-gradient(180deg, rgba(87, 230, 255, 0.07), transparent 40%);
+  box-shadow: var(--shadow);
+}
+
+.studio-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, transparent 0%, rgba(87, 230, 255, 0.1) 50%, transparent 100%);
+  transform: translateX(-60%);
+  animation: sweep 10s linear infinite;
+  pointer-events: none;
+}
+
+.studio-hero-inner {
+  position: relative;
+  padding: 24px;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.eyebrow::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 18px rgba(87, 230, 255, 0.8);
+}
+
+.hero-title {
+  font-size: clamp(2rem, 3.4vw, 3.6rem);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  margin: 10px 0 10px;
+}
+
+.hero-copy {
+  color: var(--text-dim);
+  max-width: 72ch;
+  font-size: 0.98rem;
+  line-height: 1.6;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(10, 18, 34, 0.72);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.chip strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.panel {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+.panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 24%);
+  pointer-events: none;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(129, 154, 190, 0.12);
+  background: rgba(6, 12, 24, 0.28);
+}
+
+.panel-title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.panel-kicker {
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.panel-body {
+  position: relative;
+  padding: 20px;
+}
+
+.panel-subtle {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.metric-card {
+  position: relative;
+  overflow: hidden;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(15, 24, 44, 0.92), rgba(11, 18, 34, 0.82));
+}
+
+.metric-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent, rgba(255,255,255,0.04), transparent);
+  transform: translateX(-60%);
+  animation: sweep 8s linear infinite;
+  pointer-events: none;
+}
+
+.metric-value {
+  position: relative;
+  z-index: 1;
+  font-size: clamp(1.8rem, 2.4vw, 2.6rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-label {
+  position: relative;
+  z-index: 1;
+  margin-top: 8px;
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.metric-track {
+  position: relative;
+  margin-top: 12px;
+  height: 2px;
+  background: rgba(129, 154, 190, 0.12);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.metric-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(87, 230, 255, 0.95), rgba(86, 245, 159, 0.95));
+  box-shadow: 0 0 16px rgba(87, 230, 255, 0.35);
+  transition: width 0.5s ease;
+}
+
+.app-grid-2 {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.35fr);
+  gap: 16px;
+}
+
+.panel-compact {
+  border-radius: 20px;
+}
+
+.button-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn-soft, .btn-primary, .btn-ghost, .btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.btn-soft:hover, .btn-primary:hover, .btn-ghost:hover, .btn-danger:hover {
+  transform: translateY(-1px);
+}
+
+.btn-soft {
+  background: rgba(10, 18, 34, 0.82);
+  color: var(--text);
+}
+
+.btn-primary {
+  background: linear-gradient(180deg, rgba(87, 230, 255, 0.96), rgba(65, 140, 255, 0.98));
+  border-color: rgba(87, 230, 255, 0.32);
+  color: #03111d;
+  box-shadow: 0 12px 26px rgba(65, 140, 255, 0.24);
+}
+
+.btn-primary:hover {
+  box-shadow: 0 18px 36px rgba(65, 140, 255, 0.28);
+}
+
+.btn-ghost {
+  background: rgba(10, 18, 34, 0.58);
+  color: var(--text-dim);
+}
+
+.btn-danger {
+  background: rgba(255, 111, 125, 0.08);
+  color: #ffd3d7;
+  border-color: rgba(255, 111, 125, 0.22);
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.field, .field-select, .field-textarea {
+  width: 100%;
+  border: 1px solid rgba(129, 154, 190, 0.14);
+  background: rgba(10, 18, 34, 0.66);
+  color: var(--text);
+  border-radius: 14px;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.field, .field-select {
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+.field-textarea {
+  padding: 14px;
+}
+
+.field::placeholder, .field-textarea::placeholder {
+  color: rgba(145, 166, 200, 0.35);
+}
+
+.field:focus, .field-select:focus, .field-textarea:focus {
+  outline: none;
+  border-color: rgba(87, 230, 255, 0.38);
+  box-shadow: 0 0 0 4px rgba(87, 230, 255, 0.09);
+}
+
+.notice {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 191, 87, 0.24);
+  background: rgba(255, 191, 87, 0.08);
+  color: #ffdb9d;
+}
+
+.notice strong {
+  color: #fff0c9;
+}
+
+.scrollbar-soft::-webkit-scrollbar { width: 6px; height: 6px; }
+.scrollbar-soft::-webkit-scrollbar-track { background: transparent; }
+.scrollbar-soft::-webkit-scrollbar-thumb {
+  background: rgba(129, 154, 190, 0.28);
+  border-radius: 999px;
+}
+.scrollbar-soft::-webkit-scrollbar-thumb:hover { background: rgba(87, 230, 255, 0.42); }
+
+@keyframes sweep {
+  0% { transform: translateX(-60%); }
+  100% { transform: translateX(160%); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes logFlash {
+  0% { background-color: rgba(87, 230, 255, 0.2); }
+  100% { background-color: transparent; }
+}
+
+.run-live .panel {
+  border-color: rgba(87, 230, 255, 0.26);
+  box-shadow: 0 0 0 1px rgba(87, 230, 255, 0.08), var(--shadow);
+}
+
+.run-live .metric-card:nth-child(1)::after,
+.run-live .metric-card:nth-child(2)::after {
+  animation-duration: 5s;
+}
+
+.enter-rise {
+  animation: riseIn 220ms ease both;
+}
+
+.log-row {
+  animation: logFlash 1.1s ease;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--text-faint);
+}
+
+.status-dot.is-running {
+  background: var(--accent);
+  box-shadow: 0 0 18px rgba(87, 230, 255, 0.7);
+  animation: pulseGlow 1.4s ease infinite;
+}
+
+@media (max-width: 1280px) {
+  .app-grid-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    padding: 14px;
+  }
+
+  .studio-hero-inner {
+    padding: 18px;
+  }
+
+  .hero-title {
+    font-size: 2rem;
+  }
+
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .button-row {
+    flex-wrap: wrap;
+  }
+}
+`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body className="bg-[#0a0f1a] text-gray-100 min-h-screen">
-        <main className="max-w-[1400px] mx-auto px-6 py-5">{children}</main>
+    <html lang="pt-BR" className="dark">
+      <body className="text-[var(--text)] min-h-screen">
+        <style dangerouslySetInnerHTML={{ __html: visualStyles }} />
+        <main className="app-shell">{children}</main>
       </body>
     </html>
   );

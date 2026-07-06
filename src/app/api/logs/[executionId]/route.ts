@@ -1,7 +1,3 @@
-import { logBus } from '@/lib/logger';
-import { orchestrator } from '@/lib/orchestrator';
-import type { LogEvent } from '@/lib/types';
-
 export const dynamic = 'force-dynamic';
 
 export async function GET(
@@ -9,17 +5,17 @@ export async function GET(
   { params }: { params: Promise<{ executionId: string }> }
 ) {
   const { executionId } = await params;
+  const { orchestrator } = await import('@/lib/orchestrator');
+  const { logBus } = await import('@/lib/logger');
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
     start(controller) {
-      // Replay existing logs from SQLite
       for (const log of orchestrator.getLogs(executionId)) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(log)}\n\n`));
       }
 
-      // Subscribe to live events
-      const unsubscribe = logBus.onLog(executionId, (event: LogEvent) => {
+      const unsubscribe = logBus.onLog(executionId, (event) => {
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
         } catch { /* disconnected */ }

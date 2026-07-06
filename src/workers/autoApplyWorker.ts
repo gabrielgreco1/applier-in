@@ -1,4 +1,4 @@
-import { chromium, Browser, Page } from 'playwright';
+import { chromium, Browser, Locator, Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { scoreJobMatch } from '../lib/scoring';
@@ -37,6 +37,23 @@ const stats: ExecutionStats = {
   discardedJobs: 0,
 };
 const dailyCap = parseInt(process.env.DAILY_APPLICATION_CAP || '50', 10);
+const effectiveCap = isNaN(dailyCap) || dailyCap <= 0 ? 50 : dailyCap;
+const easyApplyOnly = process.env.EASY_APPLY_ONLY === '1';
+
+const EASY_APPLY_SELECTORS = [
+  'button[data-live-test-job-apply-button]',
+  '#jobs-apply-button-id',
+  'button[aria-label*="Easy Apply"]',
+  'button[aria-label*="Apply"]',
+  'button.jobs-apply-button',
+  'a[data-live-test-job-apply-button]',
+  'a[aria-label*="Easy Apply"]',
+  'a[aria-label*="Apply"]',
+  'a.jobs-apply-button',
+  'a:has-text("Easy Apply")',
+  'button:has-text("Easy Apply")',
+];
+
 const COOKIES_FILE = path.join(process.cwd(), 'data', '.linkedin_cookies.json');
 
 process.on('message', (msg: ParentMessage) => {
@@ -83,47 +100,228 @@ async function waitForSelector(page: Page, selector: string, timeoutMs = 10000):
   }
 }
 
+async function waitForJobDetailShell(page: Page, timeoutMs = 15000): Promise<boolean> {
+  try {
+    await page.waitForFunction(() => {
+      const hasHeading = Array.from(document.querySelectorAll('h1')).some((el) => (el.textContent || '').trim().length > 0);
+      const hasApplyButton = Array.from(document.querySelectorAll('button, a')).some((el) => {
+        const text = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+        return text.includes('easy apply') || text === 'apply' || text.includes(' apply');
+      });
+      return hasHeading || hasApplyButton;
+    }, { timeout: timeoutMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Config & form filling ────────────────────────────────────────────
 
+function normalizeText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeCurrencyLike(value: string): string {
+  const cleaned = value.replace(/[^\d,.-]/g, '').trim();
+  if (!cleaned) return '';
+
+  const hasComma = cleaned.includes(',');
+  const hasDot = cleaned.includes('.');
+
+  if (hasComma && hasDot) {
+    return cleaned.replace(/\./g, '').replace(',', '.');
+  }
+
+  if (hasComma) {
+    return cleaned.replace(',', '.');
+  }
+
+  return cleaned;
+}
+
+function anyMatch(label: string, terms: string[]): boolean {
+  return terms.some((term) => label.includes(term));
+}
+
 function answerQuestion(label: string, config: AppConfig): string | null {
-  const l = label.toLowerCase();
+  const l = normalizeText(label);
 
   // 1. Custom answers first (user has priority)
   for (const rule of config.customAnswers) {
-    if (rule.keywords.some(k => l.includes(k.toLowerCase()))) return rule.answer;
+    if (rule.keywords.some(k => l.includes(normalizeText(k)))) return rule.answer;
   }
 
   // 2. Profile-based keyword matching
-  if (l.includes('first name') || l.includes('given name')) return config.profile.firstName;
-  if (l.includes('last name') || l.includes('surname') || l.includes('family name')) return config.profile.lastName;
-  if ((l.includes('phone') || l.includes('mobile') || l.includes('telefone')) && !l.includes('type')) return config.profile.phone;
-  if (l.includes('city') || l.includes('cidade')) return config.profile.city;
-  if ((l.includes('state') || l.includes('province') || l.includes('estado')) && !l.includes('united')) return config.profile.state;
-  if (l.includes('country') || l.includes('país')) return config.profile.country;
+  if (anyMatch(l, ['first name', 'given name', 'nome'])) return config.profile.firstName;
+  if (anyMatch(l, ['last name', 'surname', 'family name', 'sobrenome'])) return config.profile.lastName;
+  if (anyMatch(l, ['phone', 'mobile', 'telefone', 'celular']) && !l.includes('type')) return config.profile.phone;
+  if (anyMatch(l, ['city', 'cidade', 'location', 'current location', 'localidade', 'localizacao atual', 'localização atual', 'local atual', 'onde mora', 'where do you live'])) return config.profile.city;
+  if (anyMatch(l, ['state', 'province', 'estado']) && !l.includes('united')) return config.profile.state;
+  if (anyMatch(l, ['country', 'pais', 'país'])) return config.profile.country;
   if (l.includes('linkedin')) return config.profile.linkedinUrl;
-  if ((l.includes('website') || l.includes('portfolio') || l.includes('github') || l.includes('personal url')) && !l.includes('linkedin')) return config.profile.portfolioUrl;
-  if (l.includes('experience') || l.includes('years')) return config.profile.yearsOfExperience;
-  if (l.includes('salary') && l.includes('current')) return config.profile.currentSalary;
-  if (l.includes('salary') || l.includes('compensation') || l.includes('pay') || l.includes('expected')) return config.profile.desiredSalary;
-  if (l.includes('notice') || l.includes('start date') || l.includes('availability') || l.includes('when can you')) return config.profile.noticePeriodDays;
+  if (anyMatch(l, ['website', 'portfolio', 'github', 'personal url', 'site', 'portifolio', 'portfólio']) && !l.includes('linkedin')) return config.profile.portfolioUrl;
+  if (anyMatch(l, ['experience', 'years', 'anos de experiencia', 'anos de experiência'])) return config.profile.yearsOfExperience;
+  if (anyMatch(l, ['on-site', 'onsite', 'on site', 'presencial', 'presential', 'hybrid', 'hibrido', 'híbrido', 'work arrangement', 'work preference', 'work setup', 'office based', 'in office'])) {
+    return config.profile.acceptOnSite || 'No';
+  }
+  if (anyMatch(l, ['current salary', 'current compensation', 'salary expectation', 'desired salary', 'expected salary', 'salario atual', 'salário atual'])) {
+    return normalizeCurrencyLike(config.profile.currentSalary || config.profile.desiredSalary);
+  }
+  if (anyMatch(l, ['salary', 'compensation', 'pay', 'expected', 'desired compensation', 'pretensao salarial', 'pretensão salarial', 'pretensao', 'pretensão', 'salario pretendido', 'salário pretendido', 'clt', 'remuneracao', 'remuneração', 'pretensao salarial clt', 'pretensão salarial clt'])) {
+    return normalizeCurrencyLike(config.profile.desiredSalary || config.profile.currentSalary);
+  }
+  if (anyMatch(l, ['notice', 'start date', 'availability', 'when can you', 'aviso previo', 'aviso prévio', 'data de inicio', 'data de início', 'disponibilidade'])) return config.profile.noticePeriodDays;
 
   // 3. Compliance/EEO
-  if (l.includes('visa') || l.includes('sponsorship') || l.includes('authorization') || l.includes('authorisation') || l.includes('legally') || l.includes('work permit')) return config.compliance.requireVisa;
-  if (l.includes('gender') || l.includes('sex')) return config.compliance.gender;
-  if (l.includes('race') || l.includes('ethnic')) return config.compliance.ethnicity;
-  if (l.includes('disability') || l.includes('disabled') || l.includes('handicap')) return config.compliance.disability;
-  if (l.includes('veteran') || l.includes('military')) return config.compliance.veteran;
-  if (l.includes('citizen')) return config.compliance.usCitizenship;
+  if (anyMatch(l, ['visa', 'sponsorship', 'authorization', 'authorisation', 'legally', 'work permit', 'visto'])) return config.compliance.requireVisa;
+  if (anyMatch(l, ['gender', 'sex', 'genero', 'gênero'])) return config.compliance.gender;
+  if (anyMatch(l, ['race', 'ethnic', 'etnia'])) return config.compliance.ethnicity;
+  if (anyMatch(l, ['disability', 'disabled', 'handicap', 'deficiencia', 'deficiência'])) return config.compliance.disability;
+  if (anyMatch(l, ['veteran', 'military', 'veterano'])) return config.compliance.veteran;
+  if (anyMatch(l, ['citizen', 'cidadania', 'nacionalidade'])) return config.compliance.usCitizenship;
 
   // 4. Free text
-  if (l.includes('headline') || l.includes('professional title')) return config.freeText.headline;
-  if (l.includes('summary') || l.includes('about yourself') || l.includes('introduce')) return config.freeText.summary;
-  if (l.includes('cover letter') || l.includes('why do you want') || l.includes('motivation') || l.includes('why are you interested')) return config.freeText.coverLetter;
+  if (anyMatch(l, ['headline', 'professional title', 'titulo', 'título'])) return config.freeText.headline;
+  if (anyMatch(l, ['summary', 'about yourself', 'introduce', 'resumo'])) return config.freeText.summary;
+  if (anyMatch(l, ['cover letter', 'why do you want', 'motivation', 'why are you interested', 'carta de apresentacao', 'carta de apresentação'])) return config.freeText.coverLetter;
 
   return null;
 }
 
-async function getFieldLabel(page: Page, element: ReturnType<typeof page.locator>): Promise<string> {
+function answerEducationQuestion(label: string, config: AppConfig): string | null {
+  const l = normalizeText(label);
+
+  if (anyMatch(l, ['school', 'university', 'institution', 'college', 'faculdade', 'universidade', 'instituicao', 'instituição', 'nome da instituicao', 'nome da instituição'])) return config.education.school || null;
+  if (anyMatch(l, ['city', 'cidade', 'location'])) return config.education.city || null;
+  if (anyMatch(l, ['degree', 'grau', 'formacao', 'formação'])) return config.education.degree || null;
+  if (anyMatch(l, ['major', 'field of study', 'study', 'course', 'curso', 'area de estudo', 'área de estudo'])) return config.education.major || null;
+  if (anyMatch(l, ['currently attend', 'i currently attend', 'currently studying', 'estudando', 'atualmente estudo'])) return config.education.currentlyAttending ? 'Yes' : 'No';
+  return null;
+}
+
+function answerEducationSelect(label: string, options: string[], config: AppConfig): string | null {
+  const l = normalizeText(label);
+  const optionText = normalizeText(options.join(' '));
+  const isMonthSelect = optionText.includes('jan') || optionText.includes('feb') || optionText.includes('mar') || optionText.includes('apr') || optionText.includes('may') || optionText.includes('jun') || optionText.includes('jul') || optionText.includes('aug') || optionText.includes('sep') || optionText.includes('oct') || optionText.includes('nov') || optionText.includes('dec');
+  const isYearSelect = options.some((opt) => /^\d{4}$/.test(opt.trim()));
+
+  if (anyMatch(l, ['from', 'start', 'inicio', 'início', 'de'])) {
+    if (isMonthSelect) return config.education.startMonth || null;
+    if (isYearSelect) return config.education.startYear || null;
+  }
+
+  if (anyMatch(l, ['to', 'end', 'until', 'ate', 'até', 'a'])) {
+    if (config.education.currentlyAttending) return null;
+    if (isMonthSelect) return config.education.endMonth || null;
+    if (isYearSelect) return config.education.endYear || null;
+  }
+
+  if (anyMatch(l, ['month', 'mes', 'mês'])) {
+    if (isMonthSelect) {
+      if (anyMatch(l, ['from', 'start', 'inicio', 'início', 'de'])) return config.education.startMonth || null;
+      if (anyMatch(l, ['to', 'end', 'until', 'ate', 'até', 'a'])) return config.education.endMonth || null;
+    }
+  }
+
+  if (anyMatch(l, ['year', 'ano'])) {
+    if (isYearSelect) {
+      if (anyMatch(l, ['from', 'start', 'inicio', 'início', 'de'])) return config.education.startYear || null;
+      if (anyMatch(l, ['to', 'end', 'until', 'ate', 'até', 'a'])) return config.education.endYear || null;
+    }
+  }
+
+  return null;
+}
+
+function answerWorkLocationSelect(label: string, options: string[], config: AppConfig): string | null {
+  const l = normalizeText(label);
+  const o = options.map(normalizeText);
+  const acceptsOnSite = normalizeText(config.profile.acceptOnSite || 'No') === 'yes';
+  const hasYesNo = o.includes('yes') && o.includes('no');
+  const hasRemote = o.some((opt) => opt.includes('remote'));
+  const hasHybrid = o.some((opt) => opt.includes('hybrid'));
+  const hasOnSite = o.some((opt) => opt.includes('on site') || opt.includes('onsite') || opt.includes('presencial') || opt.includes('presential'));
+
+  if (!anyMatch(l, ['on-site', 'onsite', 'on site', 'presencial', 'presential', 'hybrid', 'hibrido', 'híbrido', 'work arrangement', 'work preference', 'work setup', 'office based', 'in office'])) {
+    return null;
+  }
+
+  if (hasYesNo) return acceptsOnSite ? 'Yes' : 'No';
+
+  if (acceptsOnSite) {
+    if (hasOnSite) return options[o.findIndex((opt) => opt.includes('on site') || opt.includes('onsite') || opt.includes('presencial') || opt.includes('presential'))];
+    if (hasHybrid) return options[o.findIndex((opt) => opt.includes('hybrid'))];
+    if (hasRemote) return options[o.findIndex((opt) => opt.includes('remote'))];
+  } else {
+    if (hasRemote) return options[o.findIndex((opt) => opt.includes('remote'))];
+    if (hasHybrid) return options[o.findIndex((opt) => opt.includes('hybrid'))];
+    if (hasYesNo) return 'No';
+  }
+
+  return null;
+}
+
+function isEducationFieldLabel(label: string): boolean {
+  const l = normalizeText(label);
+  return [
+    'school',
+    'university',
+    'institution',
+    'college',
+    'education',
+    'degree',
+    'major',
+    'field of study',
+    'currently attend',
+    'dates attended',
+    'from',
+    'to',
+    'month',
+    'year',
+  ].some((term) => l.includes(term));
+}
+
+async function isLikelyAutocompleteField(element: Locator): Promise<boolean> {
+  const ariaAutocomplete = await element.getAttribute('aria-autocomplete').catch(() => '');
+  const role = await element.getAttribute('role').catch(() => '');
+  const list = await element.getAttribute('list').catch(() => '');
+  const className = await element.getAttribute('class').catch(() => '');
+  return Boolean(
+    (ariaAutocomplete && ariaAutocomplete !== 'none')
+    || role === 'combobox'
+    || list
+    || className?.toLowerCase().includes('typeahead')
+    || className?.toLowerCase().includes('autocomplete'),
+  );
+}
+
+async function fillTextField(page: Page, element: Locator, label: string, answer: string, jobId: string, stage: 'apply' | 'system' = 'apply') {
+  await element.fill(answer);
+
+  if (await isLikelyAutocompleteField(element)) {
+    await page.waitForTimeout(600);
+    const option = page.locator('[role="option"]:visible').filter({ hasText: new RegExp(answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+    if (await option.isVisible().catch(() => false)) {
+      await option.click({ force: true });
+      sendLog({ level: 'info', stage, message: `Selected autocomplete option for "${label}" → "${answer}"`, meta: { jobId } });
+      return;
+    }
+    await element.press('ArrowDown').catch(() => undefined);
+    await element.press('Enter').catch(() => undefined);
+    sendLog({ level: 'info', stage, message: `Confirmed autocomplete value for "${label}" → "${answer}"`, meta: { jobId } });
+    return;
+  }
+
+  await element.press('Tab').catch(() => undefined);
+}
+
+async function getFieldLabel(page: Page, element: Locator): Promise<string> {
   try {
     // Try aria-label
     const ariaLabel = await element.getAttribute('aria-label');
@@ -161,10 +359,20 @@ async function getFieldLabel(page: Page, element: ReturnType<typeof page.locator
   }
 }
 
-async function fillFormFields(page: Page, config: AppConfig, jobId: string): Promise<{ filled: number; unanswered: string[] }> {
+async function fillFormFields(page: Page, config: AppConfig, jobId: string): Promise<{ filled: number; unanswered: string[]; educationBlocked: boolean }> {
   const modal = page.locator('.jobs-easy-apply-modal, .artdeco-modal').first();
   let filled = 0;
   const unanswered: string[] = [];
+  let educationBlocked = false;
+
+  const shouldSkipEducation = await modal.evaluate((modalEl: Element) => {
+    const text = (modalEl.textContent || '').toLowerCase();
+    return /school|university|college|degree|major|field of study|dates attended|education/.test(text);
+  }).catch(() => false);
+
+  if (shouldSkipEducation && !config.education.school.trim()) {
+    return { filled, unanswered, educationBlocked: true };
+  }
 
   // 1. Text inputs
   const textInputs = modal.locator('input[type="text"]:not([readonly]):visible, input:not([type]):not([readonly]):visible');
@@ -178,16 +386,18 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
     const label = await getFieldLabel(page, input);
     if (!label) continue;
 
-    let answer = answerQuestion(label, config);
-    if (!answer && config.useAI && config.openaiApiKey) {
+    const educationField = isEducationFieldLabel(label);
+    let answer = educationField ? answerEducationQuestion(label, config) : answerQuestion(label, config);
+    if (!answer && !educationField && config.useAI && config.openaiApiKey) {
       answer = await askAI(label, null, config);
       if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered "${label}" → "${answer}"`, meta: { jobId } });
     }
     if (answer) {
-      await input.fill(answer);
+      await fillTextField(page, input, label, answer, jobId);
       filled++;
     } else {
       unanswered.push(label);
+      if (educationField) educationBlocked = true;
     }
   }
 
@@ -203,8 +413,9 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
     const label = await getFieldLabel(page, ta);
     if (!label) continue;
 
-    let answer = answerQuestion(label, config);
-    if (!answer && config.useAI && config.openaiApiKey) {
+    const educationField = isEducationFieldLabel(label);
+    let answer = educationField ? answerEducationQuestion(label, config) : answerQuestion(label, config);
+    if (!answer && !educationField && config.useAI && config.openaiApiKey) {
       answer = await askAI(label, null, config);
       if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered "${label}" (textarea)`, meta: { jobId } });
     }
@@ -214,6 +425,7 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
       sendLog({ level: 'info', stage: 'apply', message: `Filled "${label}" (textarea)`, meta: { jobId } });
     } else {
       unanswered.push(label);
+      if (educationField) educationBlocked = true;
     }
   }
 
@@ -294,13 +506,16 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
     }
 
     const select = modal.locator('select').nth(selectInfo.index);
-    let answer = answerQuestion(selectInfo.label, config);
+    const educationField = isEducationFieldLabel(selectInfo.label);
+    let answer = educationField
+      ? answerEducationSelect(selectInfo.label, selectInfo.options, config)
+      : answerWorkLocationSelect(selectInfo.label, selectInfo.options, config) || answerQuestion(selectInfo.label, config);
 
     if (!answer) {
-      if (config.useAI && config.openaiApiKey) {
+      if (!educationField && config.useAI && config.openaiApiKey) {
         // AI fallback — answers based on resume/profile context
         answer = await askAI(selectInfo.label, selectInfo.options, config);
-      } else {
+      } else if (!educationField) {
         // No AI: auto-Yes for Yes/No qualification questions
         const hasYes = selectInfo.options.some(o => o.toLowerCase() === 'yes');
         const hasNo = selectInfo.options.some(o => o.toLowerCase() === 'no');
@@ -331,13 +546,42 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
         sendLog({ level: 'info', stage: 'apply', message: `Selected "${selectInfo.label.slice(0, 50)}" → "${answer}"`, meta: { jobId } });
       } else {
         unanswered.push(selectInfo.label);
+        if (educationField) educationBlocked = true;
       }
     } else {
       unanswered.push(selectInfo.label);
+      if (educationField) educationBlocked = true;
     }
   }
 
-  // 4. Radio buttons (fieldsets)
+  // 4. Checkboxes
+  const checkboxes = modal.locator('input[type="checkbox"]:visible');
+  const cbCount = await checkboxes.count().catch(() => 0);
+  for (let i = 0; i < cbCount; i++) {
+    const checkbox = checkboxes.nth(i);
+    if (!await checkbox.isVisible().catch(() => false)) continue;
+    if (await checkbox.isChecked().catch(() => false)) continue;
+
+    const label = await getFieldLabel(page, checkbox);
+    if (!label) continue;
+
+    const l = label.toLowerCase();
+    if (l.includes('currently attend') || l.includes('i currently attend')) {
+      if (config.education.currentlyAttending) {
+        await checkbox.check({ force: true });
+        filled++;
+        sendLog({ level: 'info', stage: 'apply', message: `Checked "${label}"`, meta: { jobId } });
+      }
+      continue;
+    }
+
+    if (isEducationFieldLabel(label) && !label.includes('currently attend')) {
+      unanswered.push(label);
+      educationBlocked = true;
+    }
+  }
+
+  // 5. Radio buttons (fieldsets)
   const fieldsets = modal.locator('fieldset:visible');
   const fsCount = await fieldsets.count().catch(() => 0);
   for (let i = 0; i < fsCount; i++) {
@@ -352,6 +596,9 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
     const labelTexts = await radioLabels.allTextContents().catch(() => [] as string[]);
 
     let answer = answerQuestion(legend.trim(), config);
+    if (!answer) {
+      answer = answerWorkLocationSelect(legend.trim(), labelTexts, config);
+    }
     if (!answer && config.useAI && config.openaiApiKey) {
       answer = await askAI(legend.trim(), labelTexts.map(t => t.trim()).filter(Boolean), config);
       if (answer) sendLog({ level: 'info', stage: 'apply', message: `AI answered radio "${legend.trim()}" → "${answer}"`, meta: { jobId } });
@@ -375,7 +622,35 @@ async function fillFormFields(page: Page, config: AppConfig, jobId: string): Pro
     }
   }
 
-  return { filled, unanswered };
+  return { filled, unanswered, educationBlocked };
+}
+
+async function dismissEducationStep(page: Page): Promise<boolean> {
+  const modal = page.locator('.jobs-easy-apply-modal, .artdeco-modal').first();
+  const cancelButton = modal.getByRole('button', { name: /^(cancel|cancelar)$/i }).first();
+
+  if (!await cancelButton.isVisible().catch(() => false)) {
+    const cancelFallback = modal.locator('button.artdeco-button--tertiary, button.artdeco-button--muted').filter({
+      hasText: /cancel|cancelar/i,
+    }).first();
+    if (await cancelFallback.isVisible().catch(() => false)) {
+      await cancelFallback.click({ force: true });
+    } else {
+      return false;
+    }
+  } else {
+    await cancelButton.click({ force: true });
+  }
+
+  await page.waitForTimeout(500);
+
+  const discardButton = page.getByRole('button', { name: /^(discard|descartar)$/i }).first();
+  if (await discardButton.isVisible().catch(() => false)) {
+    await discardButton.click({ force: true });
+    await page.waitForTimeout(750);
+  }
+
+  return true;
 }
 
 async function askAI(label: string, options: string[] | null, config: AppConfig): Promise<string | null> {
@@ -391,6 +666,7 @@ async function askAI(label: string, options: string[] | null, config: AppConfig)
       config.profile.firstName && `Name: ${config.profile.firstName} ${config.profile.lastName}`,
       config.profile.city && `Location: ${config.profile.city}, ${config.profile.state}, ${config.profile.country}`,
       config.profile.yearsOfExperience && `Years of experience: ${config.profile.yearsOfExperience}`,
+      config.education.school && `Education: ${config.education.school}${config.education.degree ? `, ${config.education.degree}` : ''}${config.education.major ? `, ${config.education.major}` : ''}`,
     ].filter(Boolean).join('\n');
 
     const hasOptions = options && options.length > 0;
@@ -519,16 +795,31 @@ async function main() {
     if (shouldStop) { sendDone('finished', stats); return; }
 
     // Step 2: Collect job listings across multiple pages
-    const searchUrl = process.env.JOB_SEARCH_URL!;
-    const maxPages = parseInt(process.env.MAX_PAGES || '3', 10);
-    sendLog({ level: 'info', stage: 'fetch', message: `Collecting jobs from up to ${maxPages} pages...`, meta: { url: searchUrl } });
+    const searchUrl = process.env.JOB_SEARCH_URL || '';
+    const rawMaxPages = parseInt(process.env.MAX_PAGES || '3', 10);
+    const maxPages = isNaN(rawMaxPages) || rawMaxPages < 1 ? 3 : Math.min(rawMaxPages, 20);
 
-    const jobLinks = await collectJobLinks(page, searchUrl, maxPages);
+    if (!searchUrl || !searchUrl.includes('linkedin.com')) {
+      sendLog({ level: 'error', stage: 'fetch', message: `JOB_SEARCH_URL is not set or is invalid: "${searchUrl.slice(0, 80)}". Restart the server and try again.` });
+      sendDone('error', stats);
+      return;
+    }
+
+    sendLog({ level: 'info', stage: 'fetch', message: `Collecting jobs from up to ${maxPages} pages... (local cap: ${effectiveCap})`, meta: { url: searchUrl } });
+
+    const rawJobLinks = await collectJobLinks(page, searchUrl, maxPages);
+
+    // Keep each local run bounded even if the search returns many pages.
+    const jobLinks = rawJobLinks.slice(0, effectiveCap);
+    const capped = rawJobLinks.length > jobLinks.length;
+
     sendLog({
       level: jobLinks.length > 0 ? 'info' : 'warn',
       stage: 'fetch',
-      message: `Found ${jobLinks.length} total job listings across all pages`,
-      meta: { count: jobLinks.length },
+      message: capped
+        ? `Found ${rawJobLinks.length} jobs, capped to ${jobLinks.length} (local run limit)`
+        : `Found ${jobLinks.length} total job listings across all pages`,
+      meta: { count: jobLinks.length, capped },
     });
 
     if (jobLinks.length === 0) {
@@ -540,13 +831,13 @@ async function main() {
     // Step 4: Process each job
     for (const jobUrl of jobLinks) {
       if (shouldStop) break;
-      if (stats.appliedJobs >= dailyCap) {
-        sendLog({ level: 'warn', stage: 'system', message: `Daily cap reached (${dailyCap})` });
+      if (stats.totalJobs >= effectiveCap) {
+        sendLog({ level: 'warn', stage: 'system', message: `Local job limit reached (${effectiveCap})` });
         break;
       }
 
       try {
-        await processJob(page, jobUrl, config);
+        await processJob(page, jobUrl, searchUrl, config, easyApplyOnly);
       } catch (err) {
         sendLog({
           level: 'error',
@@ -624,6 +915,12 @@ async function loginToLinkedIn(page: Page, config: AppConfig) {
 async function collectJobLinks(page: Page, searchUrl: string, maxPages = 3): Promise<string[]> {
   const allLinks: string[] = [];
 
+  // Guard: catch the hot-reload arg-shift bug where userId ends up as searchUrl
+  if (!searchUrl || !searchUrl.includes('linkedin.com')) {
+    sendLog({ level: 'error', stage: 'fetch', message: `Invalid search URL: "${String(searchUrl).slice(0, 80)}". Restart the server and try again.` });
+    return [];
+  }
+
   // Strip any existing `start` param so we control pagination cleanly
   const baseUrl = searchUrl.replace(/[?&]start=\d+/, '');
   const separator = baseUrl.includes('?') ? '&' : '?';
@@ -637,131 +934,165 @@ async function collectJobLinks(page: Page, searchUrl: string, maxPages = 3): Pro
 
     sendLog({ level: 'info', stage: 'fetch', message: `Loading page ${pageNum + 1} of ${maxPages}...`, meta: { url: pageUrl } });
 
-    await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-
-
-    // Wait for job cards to render
-    let loaded
-    loaded = await waitForSelector(page, '.job-card-container, .jobs-search-results-list, .scaffold-layout__list', 12000);
-    if (!loaded) {
-      sendLog({ level: 'warn', stage: 'fetch', message: `Page ${pageNum + 1}: job cards not detected, skipping` });
-      sendLog({ level: 'warn', stage: 'fetch', message: `Retrying....` });
-
+    try {
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      loaded = await waitForSelector(page, '.job-card-container, .jobs-search-results-list, .scaffold-layout__list', 12000);
-      if (!loaded) {
-        sendLog({ level: 'warn', stage: 'fetch', message: `Retry failed` });
-
+    } catch (navErr) {
+      sendLog({ level: 'warn', stage: 'fetch', message: `Navigation failed: ${navErr instanceof Error ? navErr.message : String(navErr)}` });
       break;
-      }
     }
 
-    // Scroll the LEFT job list panel (not the job detail pane on the right).
-    // LinkedIn's layout nests job cards inside a scrollable parent.
-    // We find it dynamically by walking up from a job card to its scrollable ancestor.
-    for (let scrollPass = 0; scrollPass < 3; scrollPass++) {
-      await page.evaluate(() => {
-        // Strategy 1: Find scrollable ancestor of job cards
-        const card = document.querySelector('.job-card-container, .job-card-list__entity-lockup');
-        if (card) {
-          let el = card.parentElement;
-          while (el && el !== document.body) {
-            const style = window.getComputedStyle(el);
-            const isScrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll')
-              && el.scrollHeight > el.clientHeight;
-            if (isScrollable) {
-              el.scrollTop = el.scrollHeight;
-              return;
-            }
-            el = el.parentElement;
-          }
-        }
-        // Strategy 2: Scroll the scaffold list container
-        const scaffold = document.querySelector('.scaffold-layout__list-detail-inner, .scaffold-layout__list');
-        if (scaffold && scaffold.scrollHeight > scaffold.clientHeight) {
-          scaffold.scrollTop = scaffold.scrollHeight;
-          return;
-        }
-        // Strategy 3: Scroll the page itself (fallback)
-        window.scrollTo(0, document.body.scrollHeight);
-      });
-      await page.waitForTimeout(1200);
+    // Log redirect (helps diagnose when LinkedIn sends us somewhere unexpected)
+    const currentUrl = page.url();
+    if (!currentUrl.includes('linkedin.com/jobs')) {
+      sendLog({ level: 'warn', stage: 'fetch', message: `Redirected away from jobs: ${currentUrl}` });
     }
 
-    // Collect links using multiple selector strategies
-    const pageLinks: string[] = [];
-    const selectors = [
-      '.job-card-container__link',
-      '.job-card-list__title--link',
-      'a[href*="/jobs/view/"]',
+    // Wait for job list to appear — try multiple known container selectors
+    // (LinkedIn changes class names frequently; fall back to any job href)
+    const containerSelectors = [
+      '.jobs-search-results-list',          // common 2024–2025
+      '.scaffold-layout__list',
+      'ul.scaffold-layout__list-detail-container',
+      '.job-card-container',                // older layout
+      '.jobs-search__results-list',
+      'a[href*="/jobs/view/"]',             // last resort — page has job links
     ];
 
-    for (const selector of selectors) {
-      const elements = page.locator(selector);
-      const count = await elements.count();
-      if (count > 0) {
-        sendLog({ level: 'info', stage: 'fetch', message: `Page ${pageNum + 1}: found ${count} cards with "${selector}"` });
-        for (let i = 0; i < count; i++) {
-          const href = await elements.nth(i).getAttribute('href');
-          if (href && href.includes('/jobs/view/')) {
-            const fullUrl = href.startsWith('http') ? href : `https://www.linkedin.com${href}`;
-            const cleanUrl = fullUrl.split('?')[0];
-            if (!allLinks.includes(cleanUrl) && !pageLinks.includes(cleanUrl)) {
-              pageLinks.push(cleanUrl);
-            }
-          }
-        }
+    let loaded = false;
+    for (const cs of containerSelectors) {
+      loaded = await waitForSelector(page, cs, 7000);
+      if (loaded) {
+        sendLog({ level: 'info', stage: 'fetch', message: `Page ${pageNum + 1}: container matched "${cs}"` });
         break;
       }
     }
 
+    if (!loaded) {
+      // One retry with networkidle
+      sendLog({ level: 'warn', stage: 'fetch', message: `Page ${pageNum + 1}: no container found, retrying with networkidle...` });
+      try { await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 45000 }); } catch { /* ignore */ }
+      for (const cs of containerSelectors) {
+        loaded = await waitForSelector(page, cs, 7000);
+        if (loaded) break;
+      }
+      if (!loaded) {
+        const title = await page.title().catch(() => '?');
+        sendLog({ level: 'warn', stage: 'fetch', message: `Page ${pageNum + 1}: retry failed. Title: "${title}" URL: ${page.url()}` });
+        break;
+      }
+    }
+
+    // Give lazy-loaded cards extra time
+    await page.waitForTimeout(1500);
+
+    // Scroll the job list panel to force all cards to load
+    for (let sp = 0; sp < 3; sp++) {
+      await page.evaluate(() => {
+        const candidates = [
+          '.jobs-search-results-list',
+          '.scaffold-layout__list',
+          '.job-card-container',
+        ];
+        for (const sel of candidates) {
+          const el = document.querySelector(sel);
+          if (!el) continue;
+          let node: Element | null = el;
+          while (node && node !== document.body) {
+            const s = window.getComputedStyle(node);
+            if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+              node.scrollTop = node.scrollHeight;
+              return;
+            }
+            node = node.parentElement;
+          }
+        }
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+      await page.waitForTimeout(1000);
+    }
+
+    // ── Extract job links ───────────────────────────────────────────────────
+    // Use page.evaluate to grab ALL <a href="/jobs/view/..."> links at once.
+    // This approach is immune to LinkedIn's CSS class name changes.
+    const rawLinks: string[] = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'))
+        .map(a => (a as HTMLAnchorElement).href)
+        .filter(h => h.includes('/jobs/view/'));
+    });
+
+    const pageLinks: string[] = [];
+    for (const href of rawLinks) {
+      const cleanUrl = href.split('?')[0];
+      if (!allLinks.includes(cleanUrl) && !pageLinks.includes(cleanUrl)) {
+        pageLinks.push(cleanUrl);
+      }
+    }
+
+    sendLog({ level: 'info', stage: 'fetch', message: `Page ${pageNum + 1}: found ${pageLinks.length} unique job links` });
+
     if (pageLinks.length === 0) {
-      sendLog({ level: 'warn', stage: 'fetch', message: `Page ${pageNum + 1}: no jobs found, stopping pagination` });
+      const title = await page.title().catch(() => '?');
+      sendLog({ level: 'warn', stage: 'fetch', message: `0 jobs on page ${pageNum + 1}. Title: "${title}". Stopping pagination.` });
       break;
     }
 
     allLinks.push(...pageLinks);
-    sendLog({ level: 'info', stage: 'fetch', message: `Page ${pageNum + 1}: collected ${pageLinks.length} jobs (total: ${allLinks.length})` });
+    sendLog({ level: 'info', stage: 'fetch', message: `Page ${pageNum + 1}: +${pageLinks.length} jobs (running total: ${allLinks.length})` });
 
-    // Small delay between pages
     if (pageNum < maxPages - 1) await page.waitForTimeout(2000);
   }
 
   return allLinks;
 }
 
-async function processJob(page: Page, jobUrl: string, config: AppConfig) {
+async function processJob(page: Page, jobUrl: string, searchUrl: string, config: AppConfig, easyApplyOnly = false) {
   const jobId = jobUrl.match(/\/view\/(\d+)/)?.[1] || 'unknown';
 
   sendLog({
     level: 'info',
     stage: 'fetch',
     message: `Opening job details`,
-    meta: { jobId, url: jobUrl },
+    meta: { jobId, url: jobUrl, jobTitle: 'Unknown', company: 'Unknown' },
   });
 
   await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-  // Wait for the job title to render
-  const titleLoaded = await waitForSelector(page, '.job-details-jobs-unified-top-card__job-title, .t-24.t-bold', 10000);
-  if (!titleLoaded) {
-    sendLog({ level: 'warn', stage: 'fetch', message: 'Job details did not load in time', meta: { jobId } });
-    // Still try to continue
-    await page.waitForTimeout(2000);
+  // Wait for the job detail shell to settle. LinkedIn changes the exact markup often,
+  // so we accept either a visible heading or the apply button shell.
+  const detailReady = await waitForJobDetailShell(page, 15000);
+  if (!detailReady) {
+    sendLog({ level: 'warn', stage: 'fetch', message: 'Job details shell did not fully settle in time', meta: { jobId } });
+    await page.waitForTimeout(1500);
   }
 
   // Extract job details using multiple selector strategies
   const jobTitle = await extractText(page, [
+    'main h1',
+    'h1',
     '.job-details-jobs-unified-top-card__job-title h1',
     '.job-details-jobs-unified-top-card__job-title',
     '.t-24.t-bold',
+    '[data-test-id*="job-title"]',
   ]) || 'Unknown';
 
   const companyName = await extractText(page, [
     '.job-details-jobs-unified-top-card__company-name a',
     '.job-details-jobs-unified-top-card__company-name',
   ]) || 'Unknown';
+
+  await page.waitForTimeout(1000);
+  const easyApplyMatch = await findVisibleEasyApplyButton(page);
+
+  if (easyApplyOnly && !easyApplyMatch) {
+    stats.discardedJobs++;
+    sendLog({
+      level: 'info',
+      stage: 'decision',
+      message: `Skipping job: Easy Apply button not visible`,
+      meta: { jobId, url: jobUrl, easyApplyOnly: true },
+    });
+    return;
+  }
 
   // Try multiple selectors for job description — LinkedIn changes structure frequently
   let jobDescription = await extractText(page, [
@@ -854,67 +1185,87 @@ async function processJob(page: Page, jobUrl: string, config: AppConfig) {
     });
   }
 
-  // Attempt Easy Apply — target the specific button using its unique data attribute
-  // The correct button has data-live-test-job-apply-button="" (id="jobs-apply-button-id")
-  // Avoid button.jobs-apply-button which is a generic class shared with LinkedIn Premium upsell
-
-  // Wait a moment for the button to fully render
-  await page.waitForTimeout(1000);
-
-  // Find the Easy Apply button — LinkedIn renders two copies of the button (one hidden,
-  // one visible). We must find the VISIBLE one. .first() picks the hidden one.
-  const selectors = [
-    'button[data-live-test-job-apply-button]',
-    '#jobs-apply-button-id',
-    'button[aria-label*="Easy Apply"]',
-    'button[aria-label*="Apply"]',
-    'button.jobs-apply-button',
-  ];
-
-  let easyApplyButton = null;
-  let foundSelector = '';
-
-  for (const selector of selectors) {
-    const all = page.locator(selector);
-    const count = await all.count();
-    if (count === 0) continue;
-
-    // Iterate through all matches to find a visible one
-    for (let i = 0; i < count; i++) {
-      const loc = all.nth(i);
-      const text = await loc.textContent().catch(() => '');
-      const ariaLabel = await loc.getAttribute('aria-label').catch(() => '');
-      const combined = (text + ' ' + ariaLabel).toLowerCase();
-      if (!combined.includes('apply')) continue;
-
-      const visible = await loc.isVisible().catch(() => false);
-      if (visible) {
-        easyApplyButton = loc;
-        foundSelector = `${selector}[${i}]`;
-        break;
-      }
+  if (!easyApplyMatch) {
+    const alreadyApplied = await looksAlreadyApplied(page);
+    if (alreadyApplied) {
+      stats.discardedJobs++;
+      sendLog({
+        level: 'info',
+        stage: 'decision',
+        message: `Skipping job already marked as applied`,
+        meta: { jobId, url: jobUrl, jobTitle: jobTitle.trim(), company: companyName.trim() },
+      });
+      await returnToResults(page, searchUrl);
+      return;
     }
-    if (easyApplyButton) break;
-  }
 
-  if (!easyApplyButton) {
     stats.manualJobs++;
     sendLog({
       level: 'warn',
       stage: 'fallback',
       message: `Flagged for manual apply: Easy Apply button exists but none are visible`,
-      meta: { jobId, url: jobUrl },
+      meta: { jobId, url: jobUrl, jobTitle: jobTitle.trim(), company: companyName.trim() },
     });
+    await returnToResults(page, searchUrl);
     return;
   }
 
   sendLog({
     level: 'info',
     stage: 'apply',
-    message: `Easy Apply button found via "${foundSelector}", clicking...`,
-    meta: { jobId },
+    message: `Easy Apply button found via "${easyApplyMatch.foundSelector}", clicking...`,
+    meta: { jobId, jobTitle: jobTitle.trim(), company: companyName.trim(), url: jobUrl },
   });
-  await attemptEasyApply(page, jobTitle.trim(), jobId, easyApplyButton, config);
+  await attemptEasyApply(page, jobTitle.trim(), companyName.trim(), jobId, easyApplyMatch.button, config);
+}
+
+async function findVisibleEasyApplyButton(page: Page): Promise<{ button: Locator; foundSelector: string } | null> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    for (const selector of EASY_APPLY_SELECTORS) {
+      const all = page.locator(selector);
+      const count = await all.count().catch(() => 0);
+      if (count === 0) continue;
+
+      for (let i = 0; i < count; i++) {
+        const loc = all.nth(i);
+        const text = await loc.textContent().catch(() => '');
+        const ariaLabel = await loc.getAttribute('aria-label').catch(() => '');
+        const combined = `${text || ''} ${ariaLabel || ''}`.toLowerCase();
+        if (!combined.includes('apply')) continue;
+
+        const visible = await loc.isVisible().catch(() => false);
+        if (visible) {
+          return { button: loc, foundSelector: `${selector}[${i}]` };
+        }
+      }
+    }
+
+    const textCandidates = page.getByText('Easy Apply', { exact: false });
+    const textCount = await textCandidates.count().catch(() => 0);
+    for (let i = 0; i < textCount; i++) {
+      const loc = textCandidates.nth(i);
+      const visible = await loc.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      const handle = await loc.elementHandle().catch(() => null);
+      const ancestor = handle ? await handle.evaluateHandle((node) => {
+        const element = node as HTMLElement;
+        return element.closest('a, button, [role="button"]');
+      }).catch(() => null) : null;
+
+      if (ancestor) {
+        const candidate = page.locator('a, button, [role="button"]').filter({
+          hasText: /easy apply/i,
+        }).first();
+        if (await candidate.isVisible().catch(() => false)) {
+          return { button: candidate, foundSelector: 'text:Easy Apply' };
+        }
+      }
+    }
+
+    await page.waitForTimeout(500);
+  }
+  return null;
 }
 
 async function extractText(page: Page, selectors: string[]): Promise<string | null> {
@@ -934,7 +1285,42 @@ async function extractText(page: Page, selectors: string[]): Promise<string | nu
   return null;
 }
 
-async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, applyBtn: ReturnType<typeof page.locator>, config: AppConfig) {
+async function looksAlreadyApplied(page: Page): Promise<boolean> {
+  const appliedSelectors = [
+    'button:has-text("Applied")',
+    'button:has-text("Application submitted")',
+    'button:has-text("Candidatura enviada")',
+    'a:has-text("Applied")',
+    'span:has-text("Applied")',
+    'div:has-text("Applied")',
+  ];
+
+  for (const selector of appliedSelectors) {
+    if (await page.locator(selector).first().isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function returnToResults(page: Page, searchUrl: string): Promise<void> {
+  try {
+    const canonical = searchUrl
+      .replace(/[?&]currentJobId=\d+/g, '')
+      .replace(/[?&]position=\d+/g, '')
+      .replace(/[?&]pageNum=\d+/g, '')
+      .replace(/[?&]trackingId=[^&]+/g, '')
+      .replace(/[?&]trk=[^&]+/g, '')
+      .replace(/[?&]$/, '');
+    await page.goto(canonical, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.waitForTimeout(1500);
+  } catch {
+    // best effort
+  }
+}
+
+async function attemptEasyApply(page: Page, jobTitle: string, companyName: string, jobId: string, applyBtn: Locator, config: AppConfig) {
   sendLog({ level: 'info', stage: 'apply', message: `Starting Easy Apply for "${jobTitle}"`, meta: { jobId } });
 
   try {
@@ -948,7 +1334,7 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
 
     // Use force:true to click even if not perfectly visible — LinkedIn sometimes covers buttons with overlays
     await applyBtn.click({ force: true, timeout: 10000 });
-    sendLog({ level: 'info', stage: 'apply', message: 'Clicked Easy Apply button, waiting for modal...', meta: { jobId } });
+    sendLog({ level: 'info', stage: 'apply', message: 'Clicked Easy Apply button, waiting for modal...', meta: { jobId, jobTitle, company: companyName } });
 
     // Wait for the Easy Apply modal to appear
     const modalLoaded = await waitForSelector(page, '.jobs-easy-apply-modal, .artdeco-modal', 5000);
@@ -963,7 +1349,7 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
         sendLog({
           level: 'error',
           stage: 'system',
-          message: '🔴 LIMITE DIÁRIO ATINGIDO: O LinkedIn bloqueou novas candidaturas por hoje para evitar comportamento automatizado. Por favor, tente novamente amanhã.',
+          message: 'Daily application limit reached. LinkedIn has temporarily blocked new submissions to prevent automated behavior. Please try again tomorrow.',
         });
         shouldStop = true;
         return;
@@ -986,12 +1372,35 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
       }
 
       // Fill form fields on the current page before clicking any buttons
-      const { filled, unanswered } = await fillFormFields(page, config, jobId);
+      const { filled, unanswered, educationBlocked } = await fillFormFields(page, config, jobId);
       if (filled > 0) {
         sendLog({ level: 'info', stage: 'apply', message: `Filled ${filled} field(s) on this step`, meta: { jobId } });
       }
       if (unanswered.length > 0) {
         sendLog({ level: 'warn', stage: 'apply', message: `Questions without answers: ${unanswered.join(', ')}`, meta: { jobId, unanswered } });
+      }
+
+      if (educationBlocked) {
+        sendLog({
+          level: 'warn',
+          stage: 'fallback',
+          message: `Education step needs configuration — dismissing education editor and continuing`,
+          meta: { jobId, reason: 'Missing education config', jobTitle, company: companyName },
+        });
+        const dismissed = await dismissEducationStep(page);
+        if (!dismissed) {
+          stats.needsInfoJobs++;
+          sendLog({
+            level: 'warn',
+            stage: 'fallback',
+            message: `Could not dismiss education step cleanly — closing application`,
+          meta: { jobId, jobTitle, company: companyName },
+        });
+        await closeModal(page);
+        return;
+        }
+        await page.waitForTimeout(1000);
+        continue;
       }
 
       // Check for validation errors IF we have unanswered questions or just filled something
@@ -1052,8 +1461,8 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
           level: 'warn',
           stage: 'fallback',
           message: `Needs info: ${requiredEmpty} required field(s) for "${jobTitle}" — flagged for manual review`,
-          meta: { jobId, needsInfo: true, reason: `${requiredEmpty} required fields` },
-        });
+        meta: { jobId, needsInfo: true, reason: `${requiredEmpty} required fields`, jobTitle, company: companyName },
+      });
         await closeModal(page);
         return;
       }
@@ -1089,9 +1498,9 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
       sendLog({
         level: 'warn',
         stage: 'fallback',
-        message: `Needs info: form requires additional input for "${jobTitle}" — flagged for manual review`,
-        meta: { jobId, needsInfo: true, reason: 'No actionable buttons found in modal' },
-      });
+      message: `Needs info: form requires additional input for "${jobTitle}" — flagged for manual review`,
+      meta: { jobId, needsInfo: true, reason: 'No actionable buttons found in modal', jobTitle, company: companyName },
+    });
       await closeModal(page);
       return;
     }
@@ -1102,7 +1511,7 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
       level: 'warn',
       stage: 'fallback',
       message: `Needs info: max steps exceeded for "${jobTitle}" — flagged for manual review`,
-      meta: { jobId, needsInfo: true, reason: 'Exceeded 10 form steps' },
+      meta: { jobId, needsInfo: true, reason: 'Exceeded 10 form steps', jobTitle, company: companyName },
     });
     await closeModal(page);
   } catch (err) {
@@ -1111,7 +1520,7 @@ async function attemptEasyApply(page: Page, jobTitle: string, jobId: string, app
       level: 'error',
       stage: 'apply',
       message: `Easy Apply failed: ${err instanceof Error ? err.message : String(err)}`,
-      meta: { jobId },
+      meta: { jobId, jobTitle, company: companyName },
     });
     await closeModal(page);
   }

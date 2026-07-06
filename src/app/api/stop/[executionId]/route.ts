@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
-import { orchestrator } from '@/lib/orchestrator';
 
 export async function POST(
   _request: Request,
   { params }: { params: Promise<{ executionId: string }> }
 ) {
   const { executionId } = await params;
+  const { orchestrator } = await import('@/lib/orchestrator');
 
   try {
     orchestrator.stop(executionId);

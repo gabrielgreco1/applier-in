@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { ConfigCredentials } from '@/components/config/ConfigCredentials';
 import { ConfigResume } from '@/components/config/ConfigResume';
 import { ConfigProfile } from '@/components/config/ConfigProfile';
+import { ConfigEducation } from '@/components/config/ConfigEducation';
 import { ConfigAnswers } from '@/components/config/ConfigAnswers';
 
 interface AppConfig {
@@ -18,7 +19,12 @@ interface AppConfig {
     firstName: string; lastName: string; phone: string;
     city: string; state: string; country: string;
     linkedinUrl: string; portfolioUrl: string;
-    yearsOfExperience: string; currentSalary: string; desiredSalary: string; noticePeriodDays: string;
+    yearsOfExperience: string; currentSalary: string; desiredSalary: string; acceptOnSite: string; noticePeriodDays: string;
+  };
+  education: {
+    school: string; city: string; degree: string; major: string;
+    startMonth: string; startYear: string; endMonth: string; endYear: string;
+    currentlyAttending: boolean;
   };
   compliance: {
     requireVisa: string; usCitizenship: string;
@@ -32,7 +38,8 @@ interface AppConfig {
 
 const EMPTY_CONFIG: AppConfig = {
   openaiApiKey: '', linkedinEmail: '', linkedinPassword: '', useAI: true, useScoreMatching: true, scoreThreshold: 60, resume: '',
-  profile: { firstName: '', lastName: '', phone: '', city: '', state: '', country: '', linkedinUrl: '', portfolioUrl: '', yearsOfExperience: '', currentSalary: '', desiredSalary: '', noticePeriodDays: '' },
+  profile: { firstName: '', lastName: '', phone: '', city: '', state: '', country: '', linkedinUrl: '', portfolioUrl: '', yearsOfExperience: '', currentSalary: '', desiredSalary: '', acceptOnSite: 'Yes', noticePeriodDays: '' },
+  education: { school: '', city: '', degree: '', major: '', startMonth: '', startYear: '', endMonth: '', endYear: '', currentlyAttending: false },
   compliance: { requireVisa: 'No', usCitizenship: 'Other', gender: 'Decline', ethnicity: 'Decline', disability: 'Decline', veteran: 'Decline' },
   freeText: { headline: '', summary: '', coverLetter: '' },
   customAnswers: [],
@@ -72,44 +79,47 @@ export default function ConfigPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64 text-gray-600 text-sm">Loading config...</div>
+      <div className="flex items-center justify-center h-64 text-[var(--text-faint)] text-sm">Loading config...</div>
     );
   }
 
   return (
     <div className="space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between pb-1">
-        <div className="flex items-center gap-3">
-          <a href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center shadow-lg shadow-blue-600/20">
-              <svg className="w-4.5 h-4.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
+      <section className="studio-hero">
+        <div className="studio-hero-inner">
+          <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+            <div className="max-w-3xl">
+              <div className="eyebrow">AutoApply Local</div>
+              <h1 className="hero-title">Configuration control room.</h1>
+              <p className="hero-copy">
+                Fill this once, keep the data local, and reuse it across every run.
+              </p>
+              <div className="chip-row">
+                <div className="chip"><strong>{config.useAI ? 'AI on' : 'AI off'}</strong></div>
+                <div className="chip"><strong>{config.useScoreMatching ? 'scoring on' : 'scoring off'}</strong></div>
+                <div className="chip">Resume + profile + custom answers</div>
+              </div>
             </div>
-            <div>
-              <h1 className="text-base font-bold tracking-tight text-white">AutoApply</h1>
-              <p className="text-[11px] text-gray-600 -mt-0.5">Configuration</p>
+            <div className="button-row">
+              <a href="/dashboard" className="btn-soft text-sm font-semibold">Run Agent</a>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="btn-primary text-sm font-semibold disabled:opacity-35"
+              >
+                {saving ? 'Saving...' : saved ? 'Saved!' : 'Save Config'}
+              </button>
             </div>
-          </a>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <a href="/" className="h-8 px-4 rounded-lg bg-gray-800/80 hover:bg-gray-700 text-gray-300 text-xs
-                                  font-medium transition-all border border-gray-700/50 flex items-center">
-            Dashboard
-          </a>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="h-8 px-5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold
-                       transition-all disabled:opacity-30 shadow-md shadow-blue-600/25 flex items-center gap-1.5"
-          >
-            {saving ? 'Saving...' : saved ? 'Saved!' : 'Save Config'}
-          </button>
-        </div>
+      </section>
+
+      <div className="notice">
+        <p className="text-[11px] leading-5">
+          This workspace stays local. The app opens here by default so the next step is always configuration.
+        </p>
       </div>
 
-      {/* Sections */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-4">
           <ConfigCredentials
@@ -124,6 +134,13 @@ export default function ConfigPage() {
           <ConfigResume
             resume={config.resume}
             onChange={(value) => setConfig(prev => ({ ...prev, resume: value }))}
+          />
+          <ConfigEducation
+            education={config.education}
+            onChange={(field, value) => setConfig(prev => ({
+              ...prev,
+              education: { ...prev.education, [field]: value },
+            }))}
           />
         </div>
         <div className="space-y-4">

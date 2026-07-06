@@ -12,7 +12,7 @@ function createDb() {
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
 
-  // Create tables
+  // Create local-only tables. Existing databases with older columns still work.
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
